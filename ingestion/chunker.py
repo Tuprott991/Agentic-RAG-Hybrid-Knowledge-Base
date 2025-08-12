@@ -82,7 +82,7 @@ class SemanticChunker:
         title: str,
         source: str,
         metadata: Optional[Dict[str, Any]] = None
-    ) -> List[DocumentChunk]:
+    ) -> List[DocumentChunk]:   
         """
         Chunk a document into semantically coherent pieces.
         
