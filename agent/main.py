@@ -657,7 +657,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Development server
 if __name__ == "__main__":
     uvicorn.run(
-        "agent.api:app",
+        "agent.main:app",
         host=APP_HOST,
         port=APP_PORT,
         reload=APP_ENV == "development",
