@@ -1,3 +1,10 @@
 /first-demo-starting-setup
 /FAST MARCHING.zip
 /.env
+/.chatbot-frontend/node_modules
+/.chatbot-frontend/build
+/.chatbot-frontend/.env
+/.chatbot-frontend/.env.local
+/.chatbot-frontend/.env.development
+/.chatbot-frontend/.env.test
+/.chatbot-frontend/.env.production
