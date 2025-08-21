@@ -382,3 +382,59 @@ async def perform_comprehensive_search(
     results["total_results"] = len(results["vector_results"]) + len(results["graph_results"])
     
     return results
+
+# tool for calculate insurrance premium 
+async def calculate_insurance_premium_tool(input_data: Dict[str, Any]) -> float:
+    """
+    Calculate insurance premium based on input data.
+    
+    Args:
+        input_data: Input data for premium calculation
+    
+    Returns:
+        Calculated insurance premium
+    """
+    try:
+        # Extract relevant data from input
+        age = input_data.get("age", 0)
+        health_status = input_data.get("health_status", "healthy")
+        coverage_amount = input_data.get("coverage_amount", 0.0)
+
+        # Basic premium calculation logic (simplified)
+        base_premium = coverage_amount * 0.01  # 1% of coverage amount
+        if age > 50:
+            base_premium *= 1.2  # Increase by 20% for older age
+        if health_status == "unhealthy":
+            base_premium *= 1.5  # Increase by 50% for unhealthy status
+
+        return base_premium
+
+    except Exception as e:
+        logger.error(f"Insurance premium calculation failed: {e}")
+        return 0.0
+
+# Tool for calculate persistency in 27 months
+async def calculate_persistency_tool(input_data: Dict[str, Any]) -> float:
+    """
+    Calculate persistency based on input data.
+    Args:
+        input_data: Input data for persistency calculation
+    Returns:
+        Calculated persistency
+    """
+    try:
+        # Extract relevant data from input
+        initial_premium = input_data.get("initial_premium", 0.0)
+        months = input_data.get("months", 0)
+
+        # Basic persistency calculation logic (simplified)
+        if months == 27:
+            persistency = initial_premium * 0.8  # 80% persistency after 27 months
+        else:
+            persistency = initial_premium * (1 - (months / 100))  # Decrease persistency over time
+
+        return persistency
+
+    except Exception as e:
+        logger.error(f"Persistency calculation failed: {e}")
+        return 0.0

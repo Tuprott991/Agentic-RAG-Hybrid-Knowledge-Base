@@ -15,14 +15,24 @@ entities:
     properties:
       policy_number: {type: string, required: true}
       product_name: {type: string}
-      policy_type: {type: enum, values: [TermLife, WholeLife, UniversalLife, ULIP, Health, CriticalIllness, Accident, RiderOnly, Other]}
+      policy_type: {type: enum, values: [TermLife, WholeLife, UniversalLife, VariableUL, IndexedUL, ULIP, Health, CriticalIllness, Accident, RiderOnly, Other]}
       effective_date: {type: date}
       issue_date: {type: date}
       expiry_date: {type: date}
       currency: {type: string, default: "USD"}
-      status: {type: enum, values: [Proposed, InForce, Lapsed, Surrendered, Cancelled, Maturity, ClaimSettled]}
+      status: {type: enum, values: [Proposed, InForce, Lapsed, Surrendered, Cancelled, Maturity, ClaimSettled, GracePeriod]}
       governing_law: {type: string}
       language: {type: string}
+      # Universal Life specific properties
+      minimum_death_benefit: {type: number}
+      maximum_death_benefit: {type: number}
+      death_benefit_option: {type: enum, values: [LevelA, IncreasingB, ReturnOfPremium, Hybrid]}
+      no_lapse_guarantee: {type: boolean}
+      no_lapse_guarantee_years: {type: number}
+      policy_loan_available: {type: boolean}
+      withdrawal_allowed: {type: boolean}
+      premium_flexibility: {type: boolean}
+      investment_options_count: {type: number}
   Policyholder:
     description: An individual or organization owning the policy.
     keys: [id]
@@ -56,10 +66,17 @@ entities:
     properties:
       id: {type: string, required: true}
       amount: {type: number}
-      frequency: {type: enum, values: [Single, Monthly, Quarterly, SemiAnnual, Annual, Adhoc]}
+      frequency: {type: enum, values: [Single, Monthly, Quarterly, SemiAnnual, Annual, Flexible, Adhoc]}
       currency: {type: string, default: "USD"}
-      mode: {type: enum, values: [Regular, TopUp]}
+      mode: {type: enum, values: [Regular, TopUp, MinimumRequired, Target, Maximum]}
       due_date: {type: date}
+      # Universal Life specific premium properties
+      is_flexible: {type: boolean}
+      minimum_amount: {type: number}
+      maximum_amount: {type: number}
+      target_amount: {type: number}
+      load_percentage: {type: number}
+      allocation_to_cash_value: {type: number}
   Benefit:
     description: A benefit offered by a policy or rider (sum assured, hospitalization, waiver, etc.).
     keys: [id]
@@ -133,8 +150,185 @@ entities:
     properties:
       id: {type: string, required: true}
       title: {type: string}
-      kind: {type: enum, values: [PremiumRate, BenefitSchedule, WaitingPeriod, Deductible, SubLimit, Fees, Other]}
+      kind: {type: enum, values: [PremiumRate, BenefitSchedule, WaitingPeriod, Deductible, SubLimit, Fees, COI, SurrenderCharge, Other]}
       json: {type: string}
+  
+  CashValue:
+    description: Cash value account for universal life and other cash value policies.
+    keys: [account_id]
+    properties:
+      account_id: {type: string, required: true}
+      current_balance: {type: number}
+      guaranteed_minimum_rate: {type: number}
+      current_interest_rate: {type: number}
+      credited_date: {type: date}
+      currency: {type: string, default: "USD"}
+      account_type: {type: enum, values: [Fixed, Variable, Indexed]}
+      minimum_balance: {type: number}
+  
+  InvestmentOption:
+    description: Investment sub-account options for variable universal life policies.
+    keys: [fund_id]
+    properties:
+      fund_id: {type: string, required: true}
+      fund_name: {type: string}
+      fund_type: {type: enum, values: [Equity, Bond, Balanced, MoneyMarket, Index, Target]}
+      expense_ratio: {type: number}
+      risk_level: {type: enum, values: [Conservative, Moderate, Aggressive]}
+      minimum_transfer: {type: number}
+      performance_1yr: {type: number}
+      performance_3yr: {type: number}
+      performance_5yr: {type: number}
+  
+  PolicyCharge:
+    description: Various charges deducted from universal life policies.
+    keys: [charge_id]
+    properties:
+      charge_id: {type: string, required: true}
+      charge_type: {type: enum, values: [COI, Administration, Surrender, RiderCharge, PremiumLoad, Other]}
+      amount: {type: number}
+      rate: {type: number}
+      frequency: {type: enum, values: [Monthly, Quarterly, Annual, OneTime]}
+      effective_date: {type: date}
+      calculation_method: {type: enum, values: [Fixed, PercentOfPremium, PercentOfCashValue, PerThousand, AgeBasedRate]}
+  
+  PolicyLoan:
+    description: Loans taken against the cash value of a policy.
+    keys: [loan_id]
+    properties:
+      loan_id: {type: string, required: true}
+      principal_amount: {type: number}
+      outstanding_balance: {type: number}
+      interest_rate: {type: number}
+      loan_date: {type: date}
+      repayment_schedule: {type: enum, values: [None, Monthly, Quarterly, Annual, AtMaturity]}
+      status: {type: enum, values: [Active, Repaid, DefaultedLapse]}
+  
+  Withdrawal:
+    description: Partial withdrawals from cash value.
+    keys: [withdrawal_id]
+    properties:
+      withdrawal_id: {type: string, required: true}
+      amount: {type: number}
+      withdrawal_date: {type: date}
+      type: {type: enum, values: [PartialSurrender, FreeWithdrawal, ExcessPremium]}
+      surrender_charge: {type: number}
+      tax_implications: {type: string}
+  
+  FlexiblePremium:
+    description: Flexible premium payment features specific to universal life.
+    keys: [payment_id]
+    properties:
+      payment_id: {type: string, required: true}
+      minimum_premium: {type: number}
+      maximum_premium: {type: number}
+      target_premium: {type: number}
+      skip_payment_allowed: {type: boolean}
+      catch_up_allowed: {type: boolean}
+      payment_allocation: {type: string}
+  
+  InterestRate:
+    description: Interest rates applicable to cash value accounts.
+    keys: [rate_id]
+    properties:
+      rate_id: {type: string, required: true}
+      rate_type: {type: enum, values: [Guaranteed, Current, Declared, Credited]}
+      rate_value: {type: number}
+      effective_date: {type: date}
+      declaration_frequency: {type: enum, values: [Monthly, Quarterly, Annual]}
+      minimum_guarantee: {type: number}
+      maximum_cap: {type: number}
+  
+  SurrenderSchedule:
+    description: Surrender charge schedule for universal life policies.
+    keys: [schedule_id]
+    properties:
+      schedule_id: {type: string, required: true}
+      policy_year: {type: number}
+      surrender_charge_rate: {type: number}
+      free_withdrawal_percent: {type: number}
+      applies_to: {type: enum, values: [CashValue, Premium, Both]}
+  
+  UnderwritingClass:
+    description: Risk classification affecting cost of insurance rates.
+    keys: [class_id]
+    properties:
+      class_id: {type: string, required: true}
+      class_name: {type: string}
+      risk_category: {type: enum, values: [SuperPreferred, Preferred, Standard, Substandard, Table]}
+      smoker_status: {type: enum, values: [Smoker, NonSmoker]}
+      health_rating: {type: string}
+      coi_multiplier: {type: number}
+  
+  IllustrationScenario:
+    description: Policy illustration scenarios showing projected values.
+    keys: [scenario_id]
+    properties:
+      scenario_id: {type: string, required: true}
+      scenario_type: {type: enum, values: [Guaranteed, Current, Optimistic, Pessimistic]}
+      assumed_interest_rate: {type: number}
+      projection_years: {type: number}
+      projected_cash_value: {type: number}
+      projected_death_benefit: {type: number}
+      assumptions: {type: string}
+  
+  RegulatoryRequirement:
+    description: Regulatory requirements and compliance rules.
+    keys: [requirement_id]
+    properties:
+      requirement_id: {type: string, required: true}
+      jurisdiction: {type: string}
+      regulation_name: {type: string}
+      requirement_type: {type: enum, values: [Disclosure, Illustration, Suitability, Capital, Reserve, Other]}
+      compliance_deadline: {type: date}
+      description: {type: string}
+  
+  PerformanceMetric:
+    description: Performance tracking metrics for investment options or policies.
+    keys: [metric_id]
+    properties:
+      metric_id: {type: string, required: true}
+      metric_type: {type: enum, values: [Return, Volatility, Sharpe, Beta, Alpha, ExpenseRatio, Persistency]}
+      value: {type: number}
+      period: {type: string}
+      benchmark: {type: string}
+      as_of_date: {type: date}
+  
+  TaxImplication:
+    description: Tax treatment and implications for policy transactions.
+    keys: [tax_id]
+    properties:
+      tax_id: {type: string, required: true}
+      transaction_type: {type: enum, values: [Premium, Withdrawal, Loan, Surrender, DeathBenefit, Dividend]}
+      tax_treatment: {type: enum, values: [Taxable, TaxDeferred, TaxFree, PartiallyTaxable]}
+      tax_rate: {type: number}
+      jurisdiction: {type: string}
+      effective_date: {type: date}
+      notes: {type: string}
+  
+  ValuationBasis:
+    description: Actuarial valuation basis and assumptions.
+    keys: [basis_id]
+    properties:
+      basis_id: {type: string, required: true}
+      mortality_table: {type: string}
+      interest_assumption: {type: number}
+      lapse_assumption: {type: number}
+      expense_assumption: {type: number}
+      valuation_method: {type: enum, values: [NetPremium, GrossPremium, Commissioners, GAAP, IFRS]}
+      effective_date: {type: date}
+  
+  RiskAssessment:
+    description: Risk assessment and scoring for underwriting.
+    keys: [assessment_id]
+    properties:
+      assessment_id: {type: string, required: true}
+      risk_type: {type: enum, values: [Mortality, Morbidity, Lapse, Investment, Operational, Regulatory]}
+      risk_score: {type: number}
+      assessment_date: {type: date}
+      methodology: {type: string}
+      confidence_level: {type: number}
+      recommendations: {type: string}
 
 # Relationships (edges) between nodes
 relations:
@@ -180,7 +374,7 @@ relations:
     to: Benefit
   DERIVED_FROM:
     description: Node was extracted/derived from a Document.
-    from: [Policy, Rider, Benefit, Exclusion, Condition, Premium, Term, Table]
+    from: [Policy, Rider, Benefit, Exclusion, Condition, Premium, Term, Table, CashValue, InvestmentOption, PolicyCharge, PolicyLoan, Withdrawal, FlexiblePremium, InterestRate, SurrenderSchedule, UnderwritingClass, IllustrationScenario, RegulatoryRequirement, PerformanceMetric, TaxImplication, ValuationBasis, RiskAssessment]
     to: Document
     properties:
       page: {type: number}
@@ -194,17 +388,186 @@ relations:
     description: Document references another Document.
     from: Document
     to: Document
+  
+  # Universal Life Insurance Specific Relations
+  HAS_CASH_VALUE:
+    description: Policy has a cash value account.
+    from: Policy
+    to: CashValue
+    properties:
+      account_type: {type: string}
+      opened_date: {type: date}
+  
+  INVESTS_IN:
+    description: Cash value is allocated to investment options.
+    from: CashValue
+    to: InvestmentOption
+    properties:
+      allocation_percent: {type: number}
+      allocation_date: {type: date}
+  
+  APPLIES_CHARGE:
+    description: Policy charge applies to a policy or cash value account.
+    from: PolicyCharge
+    to: [Policy, CashValue]
+    properties:
+      deduction_date: {type: date}
+      amount_deducted: {type: number}
+  
+  HAS_LOAN:
+    description: Policy has an outstanding loan.
+    from: Policy
+    to: PolicyLoan
+    properties:
+      loan_to_value_ratio: {type: number}
+  
+  LOAN_AGAINST:
+    description: Loan is secured by cash value.
+    from: PolicyLoan
+    to: CashValue
+  
+  HAS_WITHDRAWAL:
+    description: Policy has withdrawal history.
+    from: Policy
+    to: Withdrawal
+  
+  WITHDRAWN_FROM:
+    description: Withdrawal taken from cash value account.
+    from: Withdrawal
+    to: CashValue
+  
+  HAS_FLEXIBLE_PREMIUM:
+    description: Policy offers flexible premium payment options.
+    from: Policy
+    to: FlexiblePremium
+  
+  EARNS_INTEREST:
+    description: Cash value account earns interest at specified rates.
+    from: CashValue
+    to: InterestRate
+    properties:
+      credited_amount: {type: number}
+      credit_date: {type: date}
+  
+  SUBJECT_TO_SURRENDER:
+    description: Policy or cash value subject to surrender charges.
+    from: [Policy, CashValue]
+    to: SurrenderSchedule
+  
+  CLASSIFIED_AS:
+    description: Insured person is classified for underwriting purposes.
+    from: InsuredPerson
+    to: UnderwritingClass
+    properties:
+      classification_date: {type: date}
+      effective_period: {type: string}
+  
+  AFFECTS_COI:
+    description: Underwriting class affects cost of insurance charges.
+    from: UnderwritingClass
+    to: PolicyCharge
+    properties:
+      rate_multiplier: {type: number}
+  
+  ILLUSTRATED_BY:
+    description: Policy features are shown in illustration scenarios.
+    from: Policy
+    to: IllustrationScenario
+    properties:
+      illustration_date: {type: date}
+      compliance_approved: {type: boolean}
+  
+  PROJECTS_VALUE:
+    description: Illustration scenario projects cash value growth.
+    from: IllustrationScenario
+    to: CashValue
+    properties:
+      projected_year: {type: number}
+      projected_balance: {type: number}
+  
+  BENEFICIARY_OF:
+    description: Beneficiary entitled to policy benefits.
+    from: Beneficiary
+    to: Policy
+    properties:
+      designation_date: {type: date}
+      beneficiary_type: {type: enum, values: [Primary, Contingent, Irrevocable]}
+  
+  ALLOCATES_TO:
+    description: Premium or cash value allocates to specific investment funds.
+    from: [Premium, CashValue]
+    to: InvestmentOption
+    properties:
+      allocation_percent: {type: number}
+      allocation_amount: {type: number}
+      effective_date: {type: date}
+  
+  COMPLIES_WITH:
+    description: Policy or product complies with regulatory requirements.
+    from: [Policy, Document]
+    to: RegulatoryRequirement
+    properties:
+      compliance_status: {type: enum, values: [Compliant, NonCompliant, Pending, Exempt]}
+      verification_date: {type: date}
+  
+  HAS_PERFORMANCE:
+    description: Investment option or policy has performance metrics.
+    from: [InvestmentOption, Policy]
+    to: PerformanceMetric
+    properties:
+      measurement_period: {type: string}
+      relative_ranking: {type: number}
+  
+  TAX_TREATMENT:
+    description: Transaction or policy feature has tax implications.
+    from: [Premium, Withdrawal, PolicyLoan, Claim, Policy]
+    to: TaxImplication
+    properties:
+      applicable_amount: {type: number}
+      tax_year: {type: number}
+  
+  VALUED_USING:
+    description: Policy is valued using specific actuarial basis.
+    from: Policy
+    to: ValuationBasis
+    properties:
+      valuation_date: {type: date}
+      reserve_amount: {type: number}
+  
+  ASSESSED_FOR:
+    description: Entity is assessed for specific risks.
+    from: [Policy, InsuredPerson, InvestmentOption]
+    to: RiskAssessment
+    properties:
+      assessment_outcome: {type: string}
+      mitigation_actions: {type: string}
 
 # Index and search hints
 indexes:
   - entity: Policy
-    properties: [policy_number]
+    properties: [policy_number, policy_type]
   - entity: Rider
     properties: [code]
   - entity: Claim
     properties: [claim_number]
   - entity: Document
     properties: [doc_id]
+  - entity: CashValue
+    properties: [account_id, current_balance]
+  - entity: PolicyLoan
+    properties: [loan_id, outstanding_balance]
+  - entity: InvestmentOption
+    properties: [fund_id, fund_type]
+  - entity: PolicyCharge
+    properties: [charge_id, charge_type]
+  - entity: UnderwritingClass
+    properties: [class_id, risk_category]
+  - entity: RegulatoryRequirement
+    properties: [requirement_id, jurisdiction]
+  - entity: TaxImplication
+    properties: [tax_id, transaction_type]
+  - entity: ValuationBasis
+    properties: [basis_id, mortality_table]
 
 # Ingestion mapping suggestions (non-enforced helpers for your pipeline)
 ingestion_hints:
@@ -218,6 +581,19 @@ ingestion_hints:
     - if text contains "free-look" or "cooling-off" then Condition.type = FreeLook
     - capture sums like "$10,000" as Benefit.sum_assured with unit=Currency
     - capture percents like "80%" as Benefit.unit=Percentage
+    # Universal Life specific derivation rules
+    - if text contains "cash value" or "account value" then create CashValue entity
+    - if text contains "cost of insurance" or "COI" then create PolicyCharge with charge_type=COI
+    - if text contains "surrender charge" then create PolicyCharge with charge_type=Surrender
+    - if text contains "policy loan" then create PolicyLoan entity
+    - if text contains "partial withdrawal" then create Withdrawal entity
+    - if text contains "flexible premium" then set Premium.is_flexible=true
+    - if text contains "death benefit option" then extract Policy.death_benefit_option
+    - if text contains "guaranteed interest rate" then create InterestRate with rate_type=Guaranteed
+    - if text contains "current interest rate" then create InterestRate with rate_type=Current
+    - capture fund names and create InvestmentOption entities for variable products
+    - extract surrender charge schedules into SurrenderSchedule entities
+    - identify underwriting classes from rate tables and create UnderwritingClass entities
 
 # Validation rules (lightweight, optional)
 validation:
@@ -230,3 +606,42 @@ validation:
       RETURN p.policy_number as policy, total
   - rule: Rider expiry_age should be >= issue_age_max
     check: entity == Rider and properties.expiry_age >= properties.issue_age_max
+  
+  # Universal Life specific validation rules
+  - rule: Universal Life policies should have cash value accounts
+    query: |
+      MATCH (p:Policy {policy_type: 'UniversalLife'})
+      WHERE NOT EXISTS((p)-[:HAS_CASH_VALUE]->(:CashValue))
+      RETURN p.policy_number as policy_without_cash_value
+  
+  - rule: Cash value allocation percentages should total 100%
+    query: |
+      MATCH (cv:CashValue)-[r:INVESTS_IN]->(io:InvestmentOption)
+      WITH cv, sum(r.allocation_percent) as total_allocation
+      WHERE total_allocation != 100
+      RETURN cv.account_id as account, total_allocation
+  
+  - rule: Policy loan should not exceed available cash value
+    query: |
+      MATCH (p:Policy)-[:HAS_LOAN]->(pl:PolicyLoan)-[:LOAN_AGAINST]->(cv:CashValue)
+      WHERE pl.outstanding_balance > cv.current_balance
+      RETURN p.policy_number as policy, pl.outstanding_balance as loan, cv.current_balance as cash_value
+  
+  - rule: Flexible premium amounts should be within min/max bounds
+    query: |
+      MATCH (p:Policy)-[:PREMIUM_FOR]-(pr:Premium)
+      WHERE pr.is_flexible = true AND (pr.amount < pr.minimum_amount OR pr.amount > pr.maximum_amount)
+      RETURN p.policy_number as policy, pr.amount as amount, pr.minimum_amount as min, pr.maximum_amount as max
+  
+  - rule: Cost of Insurance charges should apply to Universal Life policies
+    query: |
+      MATCH (p:Policy {policy_type: 'UniversalLife'})
+      WHERE NOT EXISTS((p)<-[:APPLIES_CHARGE]-(:PolicyCharge {charge_type: 'COI'}))
+      RETURN p.policy_number as ul_policy_without_coi
+  
+  - rule: Surrender charges should decrease over time
+    query: |
+      MATCH (ss:SurrenderSchedule)
+      WITH ss, collect({year: ss.policy_year, rate: ss.surrender_charge_rate}) as charges
+      WHERE any(i in range(0, size(charges)-2) WHERE charges[i].rate < charges[i+1].rate)
+      RETURN ss.schedule_id as invalid_surrender_schedule
