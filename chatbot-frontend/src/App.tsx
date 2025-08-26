@@ -1,14 +1,26 @@
-import { useReducer, useState } from 'react'
+import { useReducer, useState, useEffect } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ChatContext, chatReducer, initialState } from './store/chatStore'
 import { Sidebar } from './components/Sidebar'
 import { SimpleChat } from './components/SimpleChat'
+import { ChatAPI } from './services/api'
 
 const queryClient = new QueryClient()
 
 function App() {
   const [state, dispatch] = useReducer(chatReducer, initialState)
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
+
+  // Switch to self-hosted API on app startup
+  useEffect(() => {
+    // Uncomment the line below to use your self-hosted endpoint
+    // ChatAPI.setSelfHostedProvider('https://c533d212d673.ngrok-free.app')
+    
+    // Or use with custom API key:
+    // ChatAPI.setSelfHostedProvider('https://c533d212d673.ngrok-free.app', 'your-api-key')
+    
+    console.log('Current API config:', ChatAPI.getCurrentConfig())
+  }, [])
 
   const handleNewChat = () => {
     // This will be handled by the Sidebar component

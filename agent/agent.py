@@ -34,7 +34,6 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class AgentDependencies:
     """Dependencies for the agent."""
@@ -57,6 +56,7 @@ rag_agent = Agent(
     deps_type=AgentDependencies,
     system_prompt=SYSTEM_PROMPT
 )
+
 
 
 # Register tools with proper docstrings (no description parameter)

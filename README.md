@@ -7,3 +7,20 @@ As research, to solve the problem, I would built my system with:
 - Databases:
     + PostgreSQL: Store chat history, conversation and vector (with vector extension)
     + NEO4J: Store knowledge graph with inssurance custom ontology
+
+**Target:**
+1. Set API để:
+    + Query insurrance (Through Agentic): a query in string 
+
+** New approach: LLM for extracting pdf 
+** Document: Pru-Max + Pru-tương lai tươi sáng
+- API request: 
+query: str
+conversation_id: str
+Tools: RAG + 
+
+Everything Dockerize (search for docker GPU accelerato)
+* Optimized prompt for agency (if need)
+
+
+Document Parse pipeline:

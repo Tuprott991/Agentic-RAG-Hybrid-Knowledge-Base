@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Advanced Interactive Chatbot with Enhanced Features
-Based on test_vllm.py - Professional conversational experience
-"""
 
 import requests
 import json
@@ -19,8 +14,8 @@ class ChatbotSettings:
     """Configuration settings for the chatbot"""
     max_tokens: int = 2048
     temperature: float = 0.2
-    model: str = "Qwen/Qwen3-8B"
-    base_url: str = "http://35.197.140.70:8000/v1/chat/completions"
+    model: str = "gemma-3-27b-it-q4_0"
+    base_url: str = "https://e0e11edb7719.ngrok-free.app//v1/chat/completions"
     streaming_delay: float = 0.01
     auto_save: bool = False
     show_typing_indicator: bool = True

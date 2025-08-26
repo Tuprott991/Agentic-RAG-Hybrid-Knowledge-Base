@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-GUI Streaming Chatbot with Tkinter
-Based on test_vllm.py - Graphical user interface version
-"""
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
@@ -23,11 +18,11 @@ class StreamingChatbotGUI:
         self.root.configure(bg='#2b2b2b')
         
         # Configuration
-        self.base_url = "http://35.197.140.70:8000/v1/chat/completions"
+        self.base_url = "https://c533d212d673.ngrok-free.app/v1/chat/completions"
         self.headers = {"Content-Type": "application/json"}
         self.conversation_history: List[Dict[str, str]] = []
-        self.model = "Qwen/Qwen3-8B"
-        self.max_tokens = 2048
+        self.model = "gemma-3-27b-it-q4_0"
+        self.max_tokens = 4096
         self.temperature = 0.2
         
         # Threading

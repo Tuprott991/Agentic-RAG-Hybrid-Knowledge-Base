@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-"""
-Interactive Chatbot with Streaming Output
-Based on test_vllm.py - Enhanced for conversational experience
-"""
+
 
 import requests
 import json
@@ -12,11 +8,11 @@ from typing import List, Dict, Any
 from datetime import datetime
 
 class StreamingChatbot:
-    def __init__(self, base_url: str = "http://35.197.140.70:8000/v1/chat/completions"):
+    def __init__(self, base_url: str = "https://6f7ed1d45c55.ngrok-free.app/v1/chat/completions"):
         self.base_url = base_url
         self.headers = {"Content-Type": "application/json"}
         self.conversation_history: List[Dict[str, str]] = []
-        self.model = "Qwen/Qwen3-8B"
+        self.model = "gpt-oss-20b"
         
     def add_system_message(self, content: str):
         """Add a system message to the conversation"""

@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { useChatStore, chatActions } from '../store/chatStore'
+import APIConfigSelector from './APIConfigSelector'
 
 interface SidebarProps {
   onNewChat: () => void
@@ -291,6 +292,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ onNewChat, onCollapseChange })
       </div>
 
       <div style={styles.content} className="sidebar-content">
+        {/* API Configuration */}
+        <div style={styles.section}>
+          <APIConfigSelector />
+        </div>
+
         {/* Chat Model Selection */}
         <div style={styles.section}>
         <div style={styles.sectionTitle}>Chat Model</div>

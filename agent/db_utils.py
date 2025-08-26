@@ -429,7 +429,7 @@ async def hybrid_search(
         embedding_str = '[' + ','.join(map(str, embedding)) + ']'
         
         results = await conn.fetch(
-            "SELECT * FROM hybrid_search($1::vector, $2, $3, $4)",
+            "SELECT * FROM hybrid_search($1::vector, $2, $3, $4)",  
             embedding_str,
             query_text,
             limit,

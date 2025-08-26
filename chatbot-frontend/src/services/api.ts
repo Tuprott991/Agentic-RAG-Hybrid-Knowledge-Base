@@ -14,21 +14,73 @@ export interface MessageContent {
   }
 }
 
-// OpenRouter API configuration
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1'
-const OPENROUTER_API_KEY = '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'
+// API Configuration
+export interface APIConfig {
+  provider: 'openrouter' | 'self-hosted'
+  baseUrl: string
+  apiKey: string
+  headers?: Record<string, string>
+}
 
-const api = axios.create({
-  baseURL: OPENROUTER_API_URL,
+// Default configurations
+const OPENROUTER_CONFIG: APIConfig = {
+  provider: 'openrouter',
+  baseUrl: 'https://openrouter.ai/api/v1',
+  apiKey: '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',
   headers: {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-    'HTTP-Referer': 'http://localhost:5173', // Your site URL for OpenRouter analytics
-    'X-Title': 'Prudential AI Chatbot', // Your site name for OpenRouter analytics
-  },
-})
+    'HTTP-Referer': 'http://localhost:5173',
+    'X-Title': 'Prudential AI Chatbot',
+  }
+}
+
+const SELF_HOSTED_CONFIG: APIConfig = {
+  provider: 'self-hosted',
+  baseUrl: 'https://e0e11edb7719.ngrok-free.app/v1',
+  apiKey: 'your-self-hosted-api-key', // Replace with your actual API key
+}
+
+// Current active configuration (can be changed at runtime)
+let currentConfig: APIConfig = OPENROUTER_CONFIG
+
+// Create axios instance that updates when config changes
+const createApiInstance = (config: APIConfig) => {
+  return axios.create({
+    baseURL: config.baseUrl,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.apiKey}`,
+      ...config.headers,
+    },
+  })
+}
+
+let api = createApiInstance(currentConfig)
 
 export class ChatAPI {
+  // Configuration management methods
+  static setConfiguration(config: APIConfig) {
+    currentConfig = config
+    api = createApiInstance(currentConfig)
+    console.log(`Switched to ${config.provider} API:`, config.baseUrl)
+  }
+
+  static setOpenRouterProvider() {
+    this.setConfiguration(OPENROUTER_CONFIG)
+  }
+
+  static setSelfHostedProvider(baseUrl?: string, apiKey?: string) {
+    const config: APIConfig = {
+      ...SELF_HOSTED_CONFIG,
+      ...(baseUrl && { baseUrl: baseUrl.endsWith('/v1') ? baseUrl : `${baseUrl}/v1` }),
+      ...(apiKey && { apiKey }),
+    }
+    this.setConfiguration(config)
+  }
+
+  static getCurrentConfig(): APIConfig {
+    return { ...currentConfig }
+  }
+
   static async getChatModels(): Promise<ChatModel[]> {
     // OpenRouter available models
     return [
@@ -234,9 +286,30 @@ export class ChatAPI {
       const apiMessages = messages.map((msg, index) => {
         // Use multimodal content for the last user message if files are attached
         if (index === messages.length - 1 && msg.role === 'user' && messageContent.length > 0) {
-          return {
-            "role": msg.role,
-            "content": messageContent
+          // For self-hosted endpoints, convert multimodal content to text
+          if (currentConfig.provider === 'self-hosted') {
+            let textContent = ''
+            for (const content of messageContent) {
+              if (typeof content === 'string') {
+                textContent += content + '\n'
+              } else if (content.type === 'text') {
+                textContent += content.text + '\n'
+              } else if (content.type === 'image_url') {
+                textContent += `[Image attached: ${content.image_url?.url?.substring(0, 50)}...]\n`
+              } else if (content.type === 'file') {
+                textContent += `[File attached: ${content.file?.filename}]\n`
+              }
+            }
+            return {
+              "role": msg.role,
+              "content": textContent.trim()
+            }
+          } else {
+            // For OpenRouter, use multimodal format
+            return {
+              "role": msg.role,
+              "content": messageContent
+            }
           }
         }
         return {
@@ -246,30 +319,44 @@ export class ChatAPI {
       })
 
       console.log('API Messages:', JSON.stringify(apiMessages, null, 2))
+      console.log('Provider-specific processing:', currentConfig.provider)
+      if (currentConfig.provider === 'self-hosted' && files && files.length > 0) {
+        console.log('Self-hosted: Converting multimodal content to text-only format')
+      }
 
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      const apiUrl = currentConfig.provider === 'openrouter' 
+        ? `${currentConfig.baseUrl}/chat/completions`
+        : `${currentConfig.baseUrl}/chat/completions`
+
+      const headers: Record<string, string> = {
+        "Authorization": `Bearer ${currentConfig.apiKey}`,
+        "Content-Type": "application/json",
+        ...currentConfig.headers,
+      }
+
+      console.log('Using API URL:', apiUrl)
+      console.log('Using provider:', currentConfig.provider)
+
+      const response = await fetch(apiUrl, {
         method: "POST",
-        headers: {
-          "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-          "HTTP-Referer": "http://localhost:5174", // Updated to match current port
-          "X-Title": "Prudential AI Chatbot", // Site title for rankings on openrouter.ai
-          "Content-Type": "application/json"
-        },
+        headers,
         body: JSON.stringify({
           "model": modelId,
           "messages": apiMessages,
           "max_tokens": settings.maxTokens,
           "temperature": settings.temperature,
           "stream": true,
-          // Add PDF parsing configuration for better PDF support
-          "plugins": files && files.some(f => f.type === 'application/pdf' || f.name.endsWith('.pdf')) ? [
-            {
-              "id": "file-parser",
-              "pdf": {
-                "engine": "pdf-text" // Use pdf-text engine for better text extraction
+          // Add PDF parsing configuration only for OpenRouter
+          ...(currentConfig.provider === 'openrouter' && files && files.some(f => f.type === 'application/pdf' || f.name.endsWith('.pdf')) && {
+            "plugins": [
+              {
+                "id": "file-parser",
+                "pdf": {
+                  "engine": "pdf-text" // Use pdf-text engine for better text extraction
+                }
               }
-            }
-          ] : undefined
+            ]
+          })
         })
       });
 
@@ -277,8 +364,8 @@ export class ChatAPI {
       
       if (!response.ok) {
         const errorText = await response.text()
-        console.error('OpenRouter API error:', response.status, errorText)
-        throw new Error(`OpenRouter API error! status: ${response.status}`)
+        console.error(`${currentConfig.provider} API error:`, response.status, errorText)
+        throw new Error(`${currentConfig.provider} API error! status: ${response.status}`)
       }
 
       const reader = response.body?.getReader()
