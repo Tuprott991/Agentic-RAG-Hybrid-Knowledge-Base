@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional, Set, Tuple
 from datetime import datetime, timezone
 import asyncio
 import re
+import yaml
 
 from graphiti_core import Graphiti
 from dotenv import load_dotenv
@@ -17,7 +18,7 @@ except ImportError:
     # For direct execution or testing 
     import sys
     import os
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspathx(__file__))))
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from agent.graph_utils import GraphitiClient
 
 # Load environment variables
@@ -27,12 +28,53 @@ logger = logging.getLogger(__name__)
 
 
 class GraphBuilder:
-    """Builds knowledge graph from document chunks."""
+    """Builds knowledge graph from document chunks using insurance ontology."""
     
-    def __init__(self):
-        """Initialize graph builder."""
+    def __init__(self, ontology_path: Optional[str] = None):
+        """Initialize graph builder with optional ontology."""
         self.graph_client = GraphitiClient()
         self._initialized = False
+        self.ontology = None
+        
+        # Load ontology if path provided
+        if ontology_path:
+            self.load_ontology(ontology_path)
+        else:
+            # Try to load default ontology
+            default_ontology_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "agent", "ontology", "insurance_ontology.yaml"
+            )
+            if os.path.exists(default_ontology_path):
+                self.load_ontology(default_ontology_path)
+    
+    def load_ontology(self, ontology_path: str):
+        """Load insurance ontology from YAML file."""
+        try:
+            with open(ontology_path, 'r', encoding='utf-8') as f:
+                self.ontology = yaml.safe_load(f)
+            logger.info(f"Loaded insurance ontology from {ontology_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load ontology from {ontology_path}: {e}")
+            self.ontology = None
+    
+    def get_entity_types(self) -> List[str]:
+        """Get entity types from loaded ontology."""
+        if self.ontology and 'entities' in self.ontology:
+            return list(self.ontology['entities'].keys())
+        return []
+    
+    def get_relation_types(self) -> List[str]:
+        """Get relation types from loaded ontology."""
+        if self.ontology and 'relations' in self.ontology:
+            return list(self.ontology['relations'].keys())
+        return []
+    
+    def get_ingestion_hints(self) -> Dict[str, Any]:
+        """Get ingestion hints from ontology."""
+        if self.ontology and 'ingestion_hints' in self.ontology:
+            return self.ontology['ingestion_hints']
+        return {}
     
     async def initialize(self):
         """Initialize graph client."""
@@ -146,7 +188,7 @@ class GraphBuilder:
         document_metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Prepare episode content with minimal context to avoid token limits.
+        Prepare episode content optimized for insurance ontology.
         
         Args:
             chunk: Document chunk
@@ -154,10 +196,9 @@ class GraphBuilder:
             document_metadata: Additional metadata
         
         Returns:
-            Formatted episode content (optimized for Graphiti)
+            Formatted episode content optimized for insurance domain
         """
-        # Limit chunk content to avoid Graphiti's 8192 token limit
-        # Estimate ~4 chars per token, keep content under 6000 chars to leave room for processing
+        # Limit chunk content to avoid Graphiti's token limits
         max_content_length = 6000
         
         content = chunk.content
@@ -170,18 +211,60 @@ class GraphBuilder:
                 truncated.rfind('? ')
             )
             
-            if last_sentence_end > max_content_length * 0.7:  # If we can keep 70% and end cleanly
+            if last_sentence_end > max_content_length * 0.7:
                 content = truncated[:last_sentence_end + 1] + " [TRUNCATED]"
             else:
                 content = truncated + "... [TRUNCATED]"
             
             logger.warning(f"Truncated chunk {chunk.index} from {len(chunk.content)} to {len(content)} chars for Graphiti")
         
-        # Add minimal context (just document title for now)
-        if document_title and len(content) < max_content_length - 100:
-            episode_content = f"[Doc: {document_title[:50]}]\n\n{content}"
-        else:
-            episode_content = content
+        # Prepare insurance-focused episode content
+        episode_parts = []
+        
+        # Add document context
+        episode_parts.append(f"[Document: {document_title}]")
+        
+        # Add document metadata if available
+        if document_metadata:
+            metadata_parts = []
+            if "product_name" in document_metadata:
+                metadata_parts.append(f"Product: {document_metadata['product_name']}")
+            if "policy_type" in document_metadata:
+                metadata_parts.append(f"Type: {document_metadata['policy_type']}")
+            if "document_type" in document_metadata:
+                metadata_parts.append(f"Document Type: {document_metadata['document_type']}")
+            
+            if metadata_parts:
+                episode_parts.append(f"[{', '.join(metadata_parts)}]")
+        
+        # Add extracted entities summary if available
+        entities = chunk.metadata.get('insurance_entities', {})
+        if entities:
+            entity_summary = []
+            for entity_type, entity_list in entities.items():
+                if entity_list and entity_type in ['policies', 'benefits', 'premiums', 'riders']:
+                    count = len(entity_list)
+                    if count > 0:
+                        entity_summary.append(f"{entity_type}: {count}")
+            
+            if entity_summary:
+                episode_parts.append(f"[Entities: {', '.join(entity_summary)}]")
+        
+        # Add the main content
+        episode_parts.append("")  # Empty line separator
+        episode_parts.append(content)
+        
+        episode_content = "\n".join(episode_parts)
+        
+        # Final length check
+        if len(episode_content) > max_content_length + 200:  # Account for added metadata
+            # If still too long, prioritize the main content
+            metadata_header = episode_parts[0] if episode_parts else ""
+            remaining_length = max_content_length - len(metadata_header) - 50
+            if remaining_length > 0:
+                episode_content = metadata_header + "\n\n" + content[:remaining_length] + "... [TRUNCATED]"
+            else:
+                episode_content = content[:max_content_length] + "... [TRUNCATED]"
         
         return episode_content
     
@@ -193,53 +276,83 @@ class GraphBuilder:
         """Check if content is too large for Graphiti processing."""
         return self._estimate_tokens(content) > max_tokens
     
-    async def extract_entities_from_chunks(
+    async def extract_insurance_entities_from_chunks(
         self,
         chunks: List[DocumentChunk],
-        extract_companies: bool = True,
-        extract_technologies: bool = True,
-        extract_people: bool = True
+        extract_policies: bool = True,
+        extract_benefits: bool = True,
+        extract_riders: bool = True,
+        extract_premiums: bool = True,
+        extract_claims: bool = True
     ) -> List[DocumentChunk]:
         """
-        Extract entities from chunks and add to metadata.
+        Extract insurance entities from chunks and add to metadata based on ontology.
         
         Args:
             chunks: List of document chunks
-            extract_companies: Whether to extract company names
-            extract_technologies: Whether to extract technology terms
-            extract_people: Whether to extract person names
+            extract_policies: Whether to extract policy information
+            extract_benefits: Whether to extract benefit information
+            extract_riders: Whether to extract rider information
+            extract_premiums: Whether to extract premium information
+            extract_claims: Whether to extract claim information
         
         Returns:
-            Chunks with entity metadata added
+            Chunks with insurance entity metadata added
         """
-        logger.info(f"Extracting entities from {len(chunks)} chunks")
+        logger.info(f"Extracting insurance entities from {len(chunks)} chunks")
         
         enriched_chunks = []
         
         for chunk in chunks:
             entities = {
-                "companies": [],
-                "technologies": [],
-                "people": [],
-                "locations": []
+                "policies": [],
+                "benefits": [],
+                "riders": [],
+                "premiums": [],
+                "claims": [],
+                "exclusions": [],
+                "conditions": [],
+                "cash_values": [],
+                "investment_options": [],
+                "charges": [],
+                "terms": []
             }
             
             content = chunk.content
             
-            # Extract companies
-            if extract_companies:
-                entities["companies"] = self._extract_companies(content)
+            # Extract insurance entities based on ontology
+            if extract_policies:
+                entities["policies"] = self._extract_policies(content)
             
-            # Extract technologies
-            if extract_technologies:
-                entities["technologies"] = self._extract_technologies(content)
+            if extract_benefits:
+                entities["benefits"] = self._extract_benefits(content)
             
-            # Extract people
-            if extract_people:
-                entities["people"] = self._extract_people(content)
+            if extract_riders:
+                entities["riders"] = self._extract_riders(content)
             
-            # Extract locations
-            entities["locations"] = self._extract_locations(content)
+            if extract_premiums:
+                entities["premiums"] = self._extract_premiums(content)
+            
+            if extract_claims:
+                entities["claims"] = self._extract_claims(content)
+            
+            # Extract other insurance entities
+            entities["exclusions"] = self._extract_exclusions(content)
+            entities["conditions"] = self._extract_conditions(content)
+            entities["cash_values"] = self._extract_cash_values(content)
+            entities["investment_options"] = self._extract_investment_options(content)
+            entities["charges"] = self._extract_charges(content)
+            entities["terms"] = self._extract_insurance_terms(content)
+            
+            # Apply ontology-based extraction hints
+            if self.ontology:
+                ontology_entities = self._apply_ontology_hints(content)
+                # Merge ontology-derived entities
+                for key, values in ontology_entities.items():
+                    if key.replace("_", "") in entities:
+                        entities[key.replace("_", "")].extend(values)
+                    else:
+                        entities[key] = values
             
             # Create enriched chunk
             enriched_chunk = DocumentChunk(
@@ -249,8 +362,9 @@ class GraphBuilder:
                 end_char=chunk.end_char,
                 metadata={
                     **chunk.metadata,
-                    "entities": entities,
-                    "entity_extraction_date": datetime.now().isoformat()
+                    "insurance_entities": entities,
+                    "entity_extraction_date": datetime.now().isoformat(),
+                    "ontology_version": "1.0"
                 },
                 token_count=chunk.token_count
             )
@@ -261,89 +375,541 @@ class GraphBuilder:
             
             enriched_chunks.append(enriched_chunk)
         
-        logger.info("Entity extraction complete")
-        return enriched_chunks
-    
-    def _extract_companies(self, text: str) -> List[str]:
-        """Extract company names from text."""
-        # Known tech companies (extend this list as needed)
-        tech_companies = {
-            "Google", "Microsoft", "Apple", "Amazon", "Meta", "Facebook",
-            "Tesla", "OpenAI", "Anthropic", "Nvidia", "Intel", "AMD",
-            "IBM", "Oracle", "Salesforce", "Adobe", "Netflix", "Uber",
-            "Airbnb", "Spotify", "Twitter", "LinkedIn", "Snapchat",
-            "TikTok", "ByteDance", "Baidu", "Alibaba", "Tencent",
-            "Samsung", "Sony", "Huawei", "Xiaomi", "DeepMind"
+        logger.info("Insurance entity extraction complete")
+    def _apply_ontology_hints(self, text: str) -> Dict[str, List[Dict[str, Any]]]:
+        """Apply ontology ingestion hints to extract entities."""
+        extracted = {
+            "derived_entities": [],
+            "conditions": [],
+            "exclusions": [],
+            "benefits": [],
+            "premiums": [],
+            "cash_values": [],
+            "charges": [],
+            "rates": []
         }
         
-        found_companies = set()
+        if not self.ontology:
+            return extracted
+        
+        hints = self.get_ingestion_hints()
+        derive_rules = hints.get('derive', [])
+        
         text_lower = text.lower()
         
-        for company in tech_companies:
-            # Case-insensitive search with word boundaries
-            pattern = r'\b' + re.escape(company.lower()) + r'\b'
-            if re.search(pattern, text_lower):
-                found_companies.add(company)
+        # Apply derivation rules from ontology
+        for rule in derive_rules:
+            if isinstance(rule, str):
+                # Parse rule format: "if text contains 'X' then create Y"
+                if "if text contains" in rule and "then create" in rule:
+                    parts = rule.split("then create")
+                    if len(parts) == 2:
+                        condition_part = parts[0].strip()
+                        action_part = parts[1].strip()
+                        
+                        # Extract search terms
+                        if "if text contains" in condition_part:
+                            search_terms = re.findall(r'"([^"]*)"', condition_part)
+                            if not search_terms:
+                                search_terms = re.findall(r"'([^']*)'", condition_part)
+                            
+                            # Check if any search term matches
+                            for term in search_terms:
+                                if term.lower() in text_lower:
+                                    # Extract entity type and properties from action
+                                    if "Exclusion.category" in action_part:
+                                        category = action_part.split("=")[-1].strip()
+                                        extracted["exclusions"].append({
+                                            "type": "exclusion_category",
+                                            "value": category,
+                                            "context": f"Found '{term}' indicating {category}",
+                                            "ontology_rule": rule
+                                        })
+                                    
+                                    elif "Condition.type" in action_part:
+                                        condition_type = action_part.split("=")[-1].strip()
+                                        extracted["conditions"].append({
+                                            "type": "condition_type",
+                                            "value": condition_type,
+                                            "context": f"Found '{term}' indicating {condition_type}",
+                                            "ontology_rule": rule
+                                        })
+                                    
+                                    elif "Premium.is_flexible" in action_part:
+                                        extracted["premiums"].append({
+                                            "type": "flexible_premium",
+                                            "value": True,
+                                            "context": f"Found '{term}' indicating flexible premium",
+                                            "ontology_rule": rule
+                                        })
+                                    
+                                    elif "CashValue" in action_part:
+                                        extracted["cash_values"].append({
+                                            "type": "cash_value_indicator",
+                                            "value": term,
+                                            "context": f"Found '{term}' indicating cash value feature",
+                                            "ontology_rule": rule
+                                        })
+                                    
+                                    elif "PolicyCharge" in action_part:
+                                        charge_type = "COI" if "COI" in action_part else "Surrender" if "Surrender" in action_part else "Unknown"
+                                        extracted["charges"].append({
+                                            "type": "charge_type",
+                                            "value": charge_type,
+                                            "context": f"Found '{term}' indicating {charge_type} charge",
+                                            "ontology_rule": rule
+                                        })
+                                    
+                                    elif "InterestRate" in action_part:
+                                        rate_type = "Guaranteed" if "Guaranteed" in action_part else "Current" if "Current" in action_part else "Unknown"
+                                        extracted["rates"].append({
+                                            "type": "interest_rate_type",
+                                            "value": rate_type,
+                                            "context": f"Found '{term}' indicating {rate_type} rate",
+                                            "ontology_rule": rule
+                                        })
+                
+                # Parse capture rules for amounts and percentages
+                elif "capture sums like" in rule:
+                    if "$" in rule and "Benefit.sum_assured" in rule:
+                        # Look for monetary amounts
+                        money_patterns = [
+                            r'\$[\d,]+(?:\.\d{2})?',
+                            r'USD\s*[\d,]+(?:\.\d{2})?',
+                            r'[\d,]+(?:\.\d{2})?\s*dollars?'
+                        ]
+                        
+                        for pattern in money_patterns:
+                            matches = re.finditer(pattern, text, re.IGNORECASE)
+                            for match in matches:
+                                extracted["benefits"].append({
+                                    "type": "sum_assured",
+                                    "value": match.group(0),
+                                    "unit": "Currency",
+                                    "context": f"Monetary amount: {match.group(0)}",
+                                    "ontology_rule": rule
+                                })
+                
+                elif "capture percents like" in rule:
+                    if "%" in rule and "Benefit.unit=Percentage" in rule:
+                        # Look for percentages
+                        percent_patterns = [
+                            r'\d+(?:\.\d+)?%',
+                            r'\d+(?:\.\d+)?\s*percent'
+                        ]
+                        
+                        for pattern in percent_patterns:
+                            matches = re.finditer(pattern, text, re.IGNORECASE)
+                            for match in matches:
+                                extracted["benefits"].append({
+                                    "type": "percentage_benefit",
+                                    "value": match.group(0),
+                                    "unit": "Percentage",
+                                    "context": f"Percentage amount: {match.group(0)}",
+                                    "ontology_rule": rule
+                                })
         
-        return list(found_companies)
+        return extracted
     
-    def _extract_technologies(self, text: str) -> List[str]:
-        """Extract technology terms from text."""
-        tech_terms = {
-            "AI", "artificial intelligence", "machine learning", "ML",
-            "deep learning", "neural network", "LLM", "large language model",
-            "GPT", "transformer", "NLP", "natural language processing",
-            "computer vision", "reinforcement learning", "generative AI",
-            "foundation model", "multimodal", "chatbot", "API",
-            "cloud computing", "edge computing", "quantum computing",
-            "blockchain", "cryptocurrency", "IoT", "5G", "AR", "VR",
-            "autonomous vehicles", "robotics", "automation"
-        }
+    def _extract_policies(self, text: str) -> List[Dict[str, Any]]:
+        """Extract policy information from text based on insurance ontology."""
+        policies = []
         
-        found_terms = set()
-        text_lower = text.lower()
+        # Policy types from ontology
+        policy_types = [
+            "TermLife", "WholeLife", "UniversalLife", "VariableUL", "IndexedUL", 
+            "ULIP", "Health", "CriticalIllness", "Accident"
+        ]
         
-        for term in tech_terms:
-            if term.lower() in text_lower:
-                found_terms.add(term)
+        # Policy number patterns
+        policy_number_patterns = [
+            r'Policy\s+(?:Number|No\.?)\s*:?\s*([A-Z0-9\-/]+)',
+            r'Contract\s+(?:Number|No\.?)\s*:?\s*([A-Z0-9\-/]+)',
+            r'Certificate\s+(?:Number|No\.?)\s*:?\s*([A-Z0-9\-/]+)'
+        ]
         
-        return list(found_terms)
+        for pattern in policy_number_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                policies.append({
+                    "type": "policy_number",
+                    "value": match.group(1),
+                    "context": match.group(0)
+                })
+        
+        # Policy types
+        for policy_type in policy_types:
+            pattern = r'\b' + re.escape(policy_type) + r'\b'
+            if re.search(pattern, text, re.IGNORECASE):
+                policies.append({
+                    "type": "policy_type",
+                    "value": policy_type,
+                    "context": f"Found {policy_type} policy type"
+                })
+        
+        # Death benefit options
+        death_benefit_options = ["LevelA", "IncreasingB", "ReturnOfPremium", "Hybrid"]
+        for option in death_benefit_options:
+            if option.lower() in text.lower():
+                policies.append({
+                    "type": "death_benefit_option",
+                    "value": option,
+                    "context": f"Death benefit option: {option}"
+                })
+        
+        return policies
     
-    def _extract_people(self, text: str) -> List[str]:
-        """Extract person names from text."""
-        # Known tech leaders (extend this list as needed)
-        tech_leaders = {
-            "Elon Musk", "Jeff Bezos", "Tim Cook", "Satya Nadella",
-            "Sundar Pichai", "Mark Zuckerberg", "Sam Altman",
-            "Dario Amodei", "Daniela Amodei", "Jensen Huang",
-            "Bill Gates", "Larry Page", "Sergey Brin", "Jack Dorsey",
-            "Reed Hastings", "Marc Benioff", "Andy Jassy"
-        }
+    def _extract_benefits(self, text: str) -> List[Dict[str, Any]]:
+        """Extract benefit information from text."""
+        benefits = []
         
-        found_people = set()
+        # Benefit categories from ontology
+        benefit_categories = [
+            "Death", "TPD", "CI", "Hospitalization", "Surgical", "Accident", 
+            "Waiver", "Maturity", "Survival", "CashBack", "Income"
+        ]
         
-        for person in tech_leaders:
-            if person in text:
-                found_people.add(person)
+        # Sum assured patterns
+        sum_assured_patterns = [
+            r'Sum\s+Assured\s*:?\s*\$?([\d,]+)',
+            r'Coverage\s+Amount\s*:?\s*\$?([\d,]+)',
+            r'Benefit\s+Amount\s*:?\s*\$?([\d,]+)',
+            r'Death\s+Benefit\s*:?\s*\$?([\d,]+)'
+        ]
         
-        return list(found_people)
+        for pattern in sum_assured_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                benefits.append({
+                    "type": "sum_assured",
+                    "value": match.group(1).replace(',', ''),
+                    "context": match.group(0)
+                })
+        
+        # Benefit categories
+        for category in benefit_categories:
+            pattern = r'\b' + re.escape(category) + r'\s+(?:Benefit|Coverage|Protection)'
+            if re.search(pattern, text, re.IGNORECASE):
+                benefits.append({
+                    "type": "benefit_category",
+                    "value": category,
+                    "context": f"{category} benefit identified"
+                })
+        
+        # Waiting periods
+        waiting_period_patterns = [
+            r'Waiting\s+Period\s*:?\s*(\d+)\s*(days?|months?|years?)',
+            r'(?:Pre-existing|Waiting)\s+Period\s+of\s+(\d+)\s*(days?|months?|years?)'
+        ]
+        
+        for pattern in waiting_period_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                benefits.append({
+                    "type": "waiting_period",
+                    "value": f"{match.group(1)} {match.group(2)}",
+                    "context": match.group(0)
+                })
+        
+        return benefits
     
-    def _extract_locations(self, text: str) -> List[str]:
-        """Extract location names from text."""
-        locations = {
-            "Silicon Valley", "San Francisco", "Seattle", "Austin",
-            "New York", "Boston", "London", "Tel Aviv", "Singapore",
-            "Beijing", "Shanghai", "Tokyo", "Seoul", "Bangalore",
-            "Mountain View", "Cupertino", "Redmond", "Menlo Park"
-        }
+    def _extract_riders(self, text: str) -> List[Dict[str, Any]]:
+        """Extract rider information from text."""
+        riders = []
         
-        found_locations = set()
+        # Common rider keywords
+        rider_keywords = [
+            "Rider", "Add-on", "Optional Benefit", "Supplementary Benefit",
+            "Additional Coverage", "Accelerated Death Benefit", "Waiver of Premium",
+            "Accidental Death", "Critical Illness Rider", "Income Rider"
+        ]
         
-        for location in locations:
-            if location in text:
-                found_locations.add(location)
+        # Rider code patterns
+        rider_code_patterns = [
+            r'Rider\s+(?:Code|No\.?)\s*:?\s*([A-Z0-9\-/]+)',
+            r'([A-Z]{2,4}\d{2,4})\s+(?:Rider|Add-on)',
+            r'Option\s+([A-Z]\d*)'
+        ]
         
-        return list(found_locations)
+        for pattern in rider_code_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                riders.append({
+                    "type": "rider_code",
+                    "value": match.group(1),
+                    "context": match.group(0)
+                })
+        
+        # Rider names
+        for keyword in rider_keywords:
+            if keyword.lower() in text.lower():
+                riders.append({
+                    "type": "rider_type",
+                    "value": keyword,
+                    "context": f"Found {keyword}"
+                })
+        
+        return riders
+    
+    def _extract_premiums(self, text: str) -> List[Dict[str, Any]]:
+        """Extract premium information from text."""
+        premiums = []
+        
+        # Premium frequency from ontology
+        frequencies = ["Single", "Monthly", "Quarterly", "SemiAnnual", "Annual", "Flexible"]
+        
+        # Premium amount patterns
+        premium_patterns = [
+            r'Premium\s*:?\s*\$?([\d,]+(?:\.\d{2})?)',
+            r'Monthly\s+Premium\s*:?\s*\$?([\d,]+(?:\.\d{2})?)',
+            r'Annual\s+Premium\s*:?\s*\$?([\d,]+(?:\.\d{2})?)',
+            r'Target\s+Premium\s*:?\s*\$?([\d,]+(?:\.\d{2})?)',
+            r'Minimum\s+Premium\s*:?\s*\$?([\d,]+(?:\.\d{2})?)'
+        ]
+        
+        for pattern in premium_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                premiums.append({
+                    "type": "premium_amount",
+                    "value": match.group(1).replace(',', ''),
+                    "context": match.group(0)
+                })
+        
+        # Premium frequencies
+        for frequency in frequencies:
+            if frequency.lower() in text.lower():
+                premiums.append({
+                    "type": "premium_frequency",
+                    "value": frequency,
+                    "context": f"Premium frequency: {frequency}"
+                })
+        
+        # Flexible premium indicators
+        flexible_indicators = [
+            "flexible premium", "variable premium", "adjustable premium",
+            "skip payment", "premium holiday"
+        ]
+        
+        for indicator in flexible_indicators:
+            if indicator.lower() in text.lower():
+                premiums.append({
+                    "type": "flexible_premium",
+                    "value": True,
+                    "context": indicator
+                })
+        
+        return premiums
+    
+    def _extract_claims(self, text: str) -> List[Dict[str, Any]]:
+        """Extract claim information from text."""
+        claims = []
+        
+        # Claim types from ontology
+        claim_types = [
+            "Death", "TPD", "CI", "Hospitalization", "Surgical", "Accident", 
+            "Maturity", "Surrender", "Waiver"
+        ]
+        
+        # Claim number patterns
+        claim_patterns = [
+            r'Claim\s+(?:Number|No\.?)\s*:?\s*([A-Z0-9\-/]+)',
+            r'Claim\s+ID\s*:?\s*([A-Z0-9\-/]+)'
+        ]
+        
+        for pattern in claim_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                claims.append({
+                    "type": "claim_number",
+                    "value": match.group(1),
+                    "context": match.group(0)
+                })
+        
+        # Claim types
+        for claim_type in claim_types:
+            pattern = r'\b' + re.escape(claim_type) + r'\s+Claim'
+            if re.search(pattern, text, re.IGNORECASE):
+                claims.append({
+                    "type": "claim_type",
+                    "value": claim_type,
+                    "context": f"{claim_type} claim"
+                })
+        
+        return claims
+    
+    def _extract_exclusions(self, text: str) -> List[Dict[str, Any]]:
+        """Extract exclusion information from text."""
+        exclusions = []
+        
+        # Exclusion categories from ontology
+        exclusion_categories = [
+            "PreExisting", "War", "Suicide", "SelfInflicted", "HazardousSports",
+            "AlcoholDrugs", "Pregnancy", "Covid19"
+        ]
+        
+        # Exclusion indicators
+        exclusion_indicators = [
+            "exclusion", "excluded", "not covered", "limitation",
+            "pre-existing condition", "waiting period", "suicide clause"
+        ]
+        
+        for indicator in exclusion_indicators:
+            if indicator.lower() in text.lower():
+                exclusions.append({
+                    "type": "exclusion_indicator",
+                    "value": indicator,
+                    "context": f"Exclusion: {indicator}"
+                })
+        
+        return exclusions
+    
+    def _extract_conditions(self, text: str) -> List[Dict[str, Any]]:
+        """Extract condition information from text."""
+        conditions = []
+        
+        # Condition types from ontology
+        condition_types = [
+            "Eligibility", "Underwriting", "Disclosure", "Reinstatement",
+            "Loan", "Surrender", "Grace", "FreeLook", "Tax"
+        ]
+        
+        # Common condition indicators
+        condition_indicators = [
+            "grace period", "free look", "cooling off", "eligibility",
+            "underwriting", "disclosure", "reinstatement", "loan provision"
+        ]
+        
+        for indicator in condition_indicators:
+            if indicator.lower() in text.lower():
+                conditions.append({
+                    "type": "condition_indicator",
+                    "value": indicator,
+                    "context": f"Condition: {indicator}"
+                })
+        
+        return conditions
+    
+    def _extract_cash_values(self, text: str) -> List[Dict[str, Any]]:
+        """Extract cash value information from text."""
+        cash_values = []
+        
+        # Cash value indicators
+        cash_value_indicators = [
+            "cash value", "account value", "surrender value",
+            "guaranteed minimum rate", "current interest rate"
+        ]
+        
+        # Cash value amount patterns
+        cash_value_patterns = [
+            r'Cash\s+Value\s*:?\s*\$?([\d,]+(?:\.\d{2})?)',
+            r'Account\s+Value\s*:?\s*\$?([\d,]+(?:\.\d{2})?)',
+            r'Surrender\s+Value\s*:?\s*\$?([\d,]+(?:\.\d{2})?)'
+        ]
+        
+        for pattern in cash_value_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                cash_values.append({
+                    "type": "cash_value_amount",
+                    "value": match.group(1).replace(',', ''),
+                    "context": match.group(0)
+                })
+        
+        for indicator in cash_value_indicators:
+            if indicator.lower() in text.lower():
+                cash_values.append({
+                    "type": "cash_value_feature",
+                    "value": indicator,
+                    "context": f"Cash value: {indicator}"
+                })
+        
+        return cash_values
+    
+    def _extract_investment_options(self, text: str) -> List[Dict[str, Any]]:
+        """Extract investment option information from text."""
+        investment_options = []
+        
+        # Fund types from ontology
+        fund_types = ["Equity", "Bond", "Balanced", "MoneyMarket", "Index", "Target"]
+        
+        # Investment indicators
+        investment_indicators = [
+            "investment option", "fund", "sub-account", "investment choice",
+            "portfolio", "asset allocation"
+        ]
+        
+        for fund_type in fund_types:
+            pattern = r'\b' + re.escape(fund_type) + r'\s+Fund'
+            if re.search(pattern, text, re.IGNORECASE):
+                investment_options.append({
+                    "type": "fund_type",
+                    "value": fund_type,
+                    "context": f"{fund_type} fund"
+                })
+        
+        for indicator in investment_indicators:
+            if indicator.lower() in text.lower():
+                investment_options.append({
+                    "type": "investment_feature",
+                    "value": indicator,
+                    "context": f"Investment: {indicator}"
+                })
+        
+        return investment_options
+    
+    def _extract_charges(self, text: str) -> List[Dict[str, Any]]:
+        """Extract charge information from text."""
+        charges = []
+        
+        # Charge types from ontology
+        charge_types = ["COI", "Administration", "Surrender", "RiderCharge", "PremiumLoad"]
+        
+        # Charge indicators
+        charge_indicators = [
+            "cost of insurance", "COI", "administration fee", "surrender charge",
+            "premium load", "management fee", "rider charge"
+        ]
+        
+        for charge_type in charge_types:
+            if charge_type.lower() in text.lower():
+                charges.append({
+                    "type": "charge_type",
+                    "value": charge_type,
+                    "context": f"Charge type: {charge_type}"
+                })
+        
+        for indicator in charge_indicators:
+            if indicator.lower() in text.lower():
+                charges.append({
+                    "type": "charge_indicator",
+                    "value": indicator,
+                    "context": f"Charge: {indicator}"
+                })
+        
+        return charges
+    
+    def _extract_insurance_terms(self, text: str) -> List[Dict[str, Any]]:
+        """Extract insurance terminology from text."""
+        terms = []
+        
+        # Common insurance terms
+        insurance_terms = [
+            "policyholder", "insured", "beneficiary", "underwriting",
+            "actuarial", "mortality table", "lapse", "reinstatement",
+            "annuity", "endowment", "maturity", "vesting", "surrender",
+            "convertibility", "renewability", "contestability"
+        ]
+        
+        for term in insurance_terms:
+            if term.lower() in text.lower():
+                terms.append({
+                    "type": "insurance_term",
+                    "value": term,
+                    "context": f"Insurance term: {term}"
+                })
+        
+        return terms
     
     async def clear_graph(self):
         """Clear all data from the knowledge graph."""
@@ -355,55 +921,132 @@ class GraphBuilder:
         logger.info("Knowledge graph cleared")
 
 
-class SimpleEntityExtractor:
-    """Simple rule-based entity extractor as fallback."""
+class InsuranceEntityExtractor:
+    """Insurance-focused rule-based entity extractor based on ontology."""
     
     def __init__(self):
-        """Initialize extractor."""
-        self.company_patterns = [
-            r'\b(?:Google|Microsoft|Apple|Amazon|Meta|Facebook|Tesla|OpenAI)\b',
-            r'\b\w+\s+(?:Inc|Corp|Corporation|Ltd|Limited|AG|SE)\b'
+        """Initialize extractor with insurance patterns."""
+        # Policy patterns
+        self.policy_patterns = [
+            r'Policy\s+(?:Number|No\.?)\s*:?\s*([A-Z0-9\-/]+)',
+            r'\b(?:TermLife|WholeLife|UniversalLife|VariableUL|IndexedUL|ULIP)\b',
+            r'\b(?:Health|CriticalIllness|Accident)\s+(?:Policy|Insurance)\b'
         ]
         
-        self.tech_patterns = [
-            r'\b(?:AI|artificial intelligence|machine learning|ML|deep learning)\b',
-            r'\b(?:neural network|transformer|GPT|LLM|NLP)\b',
-            r'\b(?:cloud computing|API|blockchain|IoT|5G)\b'
+        # Benefit patterns
+        self.benefit_patterns = [
+            r'Sum\s+Assured\s*:?\s*\$?([\d,]+)',
+            r'\b(?:Death|TPD|CI|Hospitalization|Surgical)\s+Benefit\b',
+            r'Coverage\s+Amount\s*:?\s*\$?([\d,]+)'
+        ]
+        
+        # Premium patterns
+        self.premium_patterns = [
+            r'Premium\s*:?\s*\$?([\d,]+(?:\.\d{2})?)',
+            r'\b(?:Monthly|Quarterly|Annual|Single)\s+Premium\b',
+            r'Flexible\s+Premium'
+        ]
+        
+        # Universal Life specific patterns
+        self.ul_patterns = [
+            r'Cash\s+Value\s*:?\s*\$?([\d,]+)',
+            r'Cost\s+of\s+Insurance|COI',
+            r'Surrender\s+Charge',
+            r'Death\s+Benefit\s+Option',
+            r'Investment\s+Option'
+        ]
+        
+        # Exclusion patterns
+        self.exclusion_patterns = [
+            r'Exclusion|Excluded|Not\s+Covered',
+            r'Pre-existing\s+Condition',
+            r'Waiting\s+Period',
+            r'Suicide\s+Clause'
         ]
     
-    def extract_entities(self, text: str) -> Dict[str, List[str]]:
-        """Extract entities using patterns."""
+    def extract_insurance_entities(self, text: str) -> Dict[str, List[Dict[str, Any]]]:
+        """Extract insurance entities using patterns."""
         entities = {
-            "companies": [],
-            "technologies": []
+            "policies": [],
+            "benefits": [],
+            "premiums": [],
+            "universal_life": [],
+            "exclusions": []
         }
         
-        # Extract companies
-        for pattern in self.company_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            entities["companies"].extend(matches)
+        # Extract policies
+        for pattern in self.policy_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                entities["policies"].append({
+                    "type": "policy",
+                    "value": match.group(0),
+                    "position": match.span()
+                })
         
-        # Extract technologies
-        for pattern in self.tech_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            entities["technologies"].extend(matches)
+        # Extract benefits
+        for pattern in self.benefit_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                entities["benefits"].append({
+                    "type": "benefit",
+                    "value": match.group(0),
+                    "position": match.span()
+                })
+        
+        # Extract premiums
+        for pattern in self.premium_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                entities["premiums"].append({
+                    "type": "premium",
+                    "value": match.group(0),
+                    "position": match.span()
+                })
+        
+        # Extract Universal Life features
+        for pattern in self.ul_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                entities["universal_life"].append({
+                    "type": "universal_life_feature",
+                    "value": match.group(0),
+                    "position": match.span()
+                })
+        
+        # Extract exclusions
+        for pattern in self.exclusion_patterns:
+            matches = re.finditer(pattern, text, re.IGNORECASE)
+            for match in matches:
+                entities["exclusions"].append({
+                    "type": "exclusion",
+                    "value": match.group(0),
+                    "position": match.span()
+                })
         
         # Remove duplicates and clean up
-        entities["companies"] = list(set(entities["companies"]))
-        entities["technologies"] = list(set(entities["technologies"]))
+        for entity_type in entities:
+            seen = set()
+            unique_entities = []
+            for entity in entities[entity_type]:
+                key = (entity["value"].lower(), entity["position"])
+                if key not in seen:
+                    seen.add(key)
+                    unique_entities.append(entity)
+            entities[entity_type] = unique_entities
         
         return entities
 
 
 # Factory function
-def create_graph_builder() -> GraphBuilder:
-    """Create graph builder instance."""
-    return GraphBuilder()
+def create_graph_builder(ontology_path: Optional[str] = None) -> GraphBuilder:
+    """Create graph builder instance with optional ontology."""
+    return GraphBuilder(ontology_path=ontology_path)
 
 
 # Example usage
 async def main():
-    """Example usage of the graph builder."""
+    """Example usage of the insurance graph builder."""
     from .chunker import ChunkingConfig, create_chunker
     
     # Create chunker and graph builder
@@ -411,42 +1054,73 @@ async def main():
     chunker = create_chunker(config)
     graph_builder = create_graph_builder()
     
-    sample_text = """
-    Google's DeepMind has made significant breakthroughs in artificial intelligence,
-    particularly in areas like protein folding prediction with AlphaFold and
-    game-playing AI with AlphaGo. The company continues to invest heavily in
-    transformer architectures and large language models.
+    sample_insurance_text = """
+    The PruMax Universal Life policy (Policy Number: UL123456789) offers flexible 
+    premiums and a guaranteed minimum death benefit of $100,000. The policy includes 
+    a cash value account that earns current interest rates, currently set at 3.5% annually.
     
-    Microsoft's partnership with OpenAI has positioned them as a leader in
-    the generative AI space. Sam Altman's OpenAI has developed GPT models
-    that Microsoft integrates into Office 365 and Azure cloud services.
+    Key Benefits:
+    - Death Benefit: Level A option with minimum $50,000
+    - Critical Illness Rider: Coverage up to $25,000
+    - Waiver of Premium Benefit in case of total and permanent disability
+    - Flexible Premium: Monthly premiums from $200 to $2,000
+    
+    Investment Options:
+    - Conservative Fund: Low-risk government bonds
+    - Balanced Fund: Mix of equity and fixed income
+    - Aggressive Growth Fund: High-risk equity investments
+    
+    Policy Charges:
+    - Cost of Insurance (COI): Age-based monthly charges
+    - Administration Fee: $5 monthly
+    - Surrender Charges: Applicable for first 10 years
+    
+    Exclusions:
+    - Pre-existing medical conditions (12-month waiting period)
+    - Suicide within first 2 years
+    - War and acts of terrorism
+    - Hazardous sports and activities
+    
+    This Universal Life policy allows policy loans up to 90% of cash value
+    and partial withdrawals after the first policy year.
     """
     
     # Chunk the document
     chunks = chunker.chunk_document(
-        content=sample_text,
-        title="AI Company Developments",
-        source="example.md"
+        content=sample_insurance_text,
+        title="PruMax Universal Life Policy Guide",
+        source="prumax_policy.pdf"
     )
     
     print(f"Created {len(chunks)} chunks")
     
-    # Extract entities
-    enriched_chunks = await graph_builder.extract_entities_from_chunks(chunks)
+    # Extract insurance entities
+    enriched_chunks = await graph_builder.extract_insurance_entities_from_chunks(chunks)
     
     for i, chunk in enumerate(enriched_chunks):
-        print(f"Chunk {i}: {chunk.metadata.get('entities', {})}")
+        entities = chunk.metadata.get('insurance_entities', {})
+        print(f"\nChunk {i} Insurance Entities:")
+        for entity_type, entity_list in entities.items():
+            if entity_list:
+                print(f"  {entity_type}: {len(entity_list)} items")
+                for entity in entity_list[:3]:  # Show first 3 items
+                    print(f"    - {entity.get('type', 'N/A')}: {entity.get('value', 'N/A')}")
     
     # Add to knowledge graph
     try:
         result = await graph_builder.add_document_to_graph(
             chunks=enriched_chunks,
-            document_title="AI Company Developments",
-            document_source="example.md",
-            document_metadata={"topic": "AI", "date": "2024"}
+            document_title="PruMax Universal Life Policy Guide",
+            document_source="prumax_policy.pdf",
+            document_metadata={
+                "document_type": "policy_guide",
+                "product_name": "PruMax",
+                "policy_type": "UniversalLife",
+                "version": "2024.1"
+            }
         )
         
-        print(f"Graph building result: {result}")
+        print(f"\nGraph building result: {result}")
         
     except Exception as e:
         print(f"Graph building failed: {e}")
@@ -455,5 +1129,37 @@ async def main():
         await graph_builder.close()
 
 
+# Demonstration of Insurance Entity Extractor
+def demo_insurance_extractor():
+    """Demonstrate the insurance entity extractor."""
+    extractor = InsuranceEntityExtractor()
+    
+    sample_text = """
+    Policy Number: UL123456789
+    Product: PruMax Universal Life Insurance
+    Sum Assured: $150,000
+    Monthly Premium: $250.00
+    Cash Value: $15,000
+    Cost of Insurance: $45/month
+    Death Benefit Option: Level A
+    Exclusions: Pre-existing conditions, suicide clause
+    """
+    
+    entities = extractor.extract_insurance_entities(sample_text)
+    
+    print("Insurance Entity Extraction Demo:")
+    for entity_type, entity_list in entities.items():
+        if entity_list:
+            print(f"\n{entity_type.title()}:")
+            for entity in entity_list:
+                print(f"  - {entity['value']} (Type: {entity['type']})")
+
+
 if __name__ == "__main__":
+    # Run entity extraction demo
+    print("=" * 50)
+    demo_insurance_extractor()
+    print("\n" + "=" * 50)
+    
+    # Run full example
     asyncio.run(main())

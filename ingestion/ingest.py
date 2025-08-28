@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 class DocumentIngestionPipeline:
-    """Pipeline for ingesting documents into vector DB and knowledge graph."""
+    """Pipeline for ingesting insurance documents into vector DB and knowledge graph."""
     
     def __init__(
         self,
@@ -66,7 +66,7 @@ class DocumentIngestionPipeline:
         
         self.chunker = create_chunker(self.chunker_config)
         self.embedder = create_embedder()
-        self.graph_builder = create_graph_builder()
+        self.graph_builder = create_graph_builder()  # Will auto-load insurance ontology
         
         self._initialized = False
     
@@ -177,7 +177,7 @@ class DocumentIngestionPipeline:
         logger.info(f"Processing document: {document_title}")
         
         # Chunk the document
-        chunks = await self.chunker.chunk_document(
+        chunks = self.chunker.chunk_document(
             content=document_content,
             title=document_title,
             source=document_source,
@@ -198,17 +198,21 @@ class DocumentIngestionPipeline:
         
         logger.info(f"Created {len(chunks)} chunks")
         
-        # Extract entities if configured
+        # Extract insurance entities if configured
         entities_extracted = 0
         if self.config.extract_entities:
-            chunks = await self.graph_builder.extract_entities_from_chunks(chunks)
+            chunks = await self.graph_builder.extract_insurance_entities_from_chunks(chunks)
             entities_extracted = sum(
-                len(chunk.metadata.get("entities", {}).get("companies", [])) +
-                len(chunk.metadata.get("entities", {}).get("technologies", [])) +
-                len(chunk.metadata.get("entities", {}).get("people", []))
+                len(chunk.metadata.get("insurance_entities", {}).get("policies", [])) +
+                len(chunk.metadata.get("insurance_entities", {}).get("benefits", [])) +
+                len(chunk.metadata.get("insurance_entities", {}).get("riders", [])) +
+                len(chunk.metadata.get("insurance_entities", {}).get("premiums", [])) +
+                len(chunk.metadata.get("insurance_entities", {}).get("claims", [])) +
+                len(chunk.metadata.get("insurance_entities", {}).get("exclusions", [])) +
+                len(chunk.metadata.get("insurance_entities", {}).get("conditions", []))
                 for chunk in chunks
             )
-            logger.info(f"Extracted {entities_extracted} entities")
+            logger.info(f"Extracted {entities_extracted} insurance entities")
         
         # Generate embeddings
         embedded_chunks = await self.embedder.embed_chunks(chunks)
@@ -301,7 +305,7 @@ class DocumentIngestionPipeline:
         return os.path.splitext(os.path.basename(file_path))[0]
     
     def _extract_document_metadata(self, content: str, file_path: str) -> Dict[str, Any]:
-        """Extract metadata from document content."""
+        """Extract metadata from document content with insurance-specific fields."""
         metadata = {
             "file_path": file_path,
             "file_size": len(content),
@@ -323,10 +327,68 @@ class DocumentIngestionPipeline:
             except Exception as e:
                 logger.warning(f"Failed to parse frontmatter: {e}")
         
-        # Extract some basic metadata from content
+        # Extract basic metadata from content
         lines = content.split('\n')
         metadata['line_count'] = len(lines)
         metadata['word_count'] = len(content.split())
+        
+        # Extract insurance-specific metadata from filename and content
+        file_name = os.path.basename(file_path).lower()
+        content_lower = content.lower()
+        
+        # Detect document type from filename
+        if 'faq' in file_name:
+            metadata['document_type'] = 'FAQ'
+        elif 'tnc' in file_name or 'terms' in file_name or 'condition' in file_name:
+            metadata['document_type'] = 'Terms_and_Conditions'
+        elif 'gioi-thieu' in file_name or 'introduction' in file_name or 'overview' in file_name:
+            metadata['document_type'] = 'Product_Overview'
+        elif 'policy' in file_name:
+            metadata['document_type'] = 'Policy_Document'
+        elif 'rider' in file_name:
+            metadata['document_type'] = 'Rider_Specification'
+        elif 'brochure' in file_name:
+            metadata['document_type'] = 'Marketing_Brochure'
+        else:
+            metadata['document_type'] = 'Insurance_Document'
+        
+        # Detect product name from filename
+        if 'prumax' in file_name:
+            metadata['product_name'] = 'PruMax'
+        elif 'pru-edu-saver' in file_name:
+            metadata['product_name'] = 'Pru-Edu-Saver'
+        elif 'prumylife' in file_name:
+            metadata['product_name'] = 'PruMyLife'
+        
+        # Detect policy type from content
+        policy_types = {
+            'universal life': 'UniversalLife',
+            'whole life': 'WholeLife',
+            'term life': 'TermLife',
+            'critical illness': 'CriticalIllness',
+            'health insurance': 'Health',
+            'accident insurance': 'Accident',
+            'variable universal': 'VariableUL',
+            'indexed universal': 'IndexedUL',
+            'ulip': 'ULIP'
+        }
+        
+        for keyword, policy_type in policy_types.items():
+            if keyword in content_lower:
+                metadata['policy_type'] = policy_type
+                break
+        
+        # Detect language
+        if any(word in content_lower for word in ['bảo hiểm', 'hợp đồng', 'quyền lợi']):
+            metadata['language'] = 'vi'  # Vietnamese
+        else:
+            metadata['language'] = 'en'  # Default to English
+        
+        # Detect currency
+        if '$' in content or 'usd' in content_lower:
+            metadata['currency'] = 'USD'
+        elif '₫' in content or 'vnd' in content_lower or 'đồng' in content_lower:
+            metadata['currency'] = 'VND'
         
         return metadata
     
@@ -399,14 +461,14 @@ class DocumentIngestionPipeline:
 
 
 async def main():
-    """Main function for running ingestion."""
-    parser = argparse.ArgumentParser(description="Ingest documents into vector DB and knowledge graph")
-    parser.add_argument("--documents", "-d", default="documents", help="Documents folder path")
+    """Main function for running insurance document ingestion."""
+    parser = argparse.ArgumentParser(description="Ingest insurance documents into vector DB and knowledge graph")
+    parser.add_argument("--documents", "-d", default="documents", help="Insurance documents folder path")
     parser.add_argument("--clean", "-c", action="store_true", help="Clean existing data before ingestion")
     parser.add_argument("--chunk-size", type=int, default=1000, help="Chunk size for splitting documents")
     parser.add_argument("--chunk-overlap", type=int, default=200, help="Chunk overlap size")
     parser.add_argument("--no-semantic", action="store_true", help="Disable semantic chunking")
-    parser.add_argument("--no-entities", action="store_true", help="Disable entity extraction")
+    parser.add_argument("--no-entities", action="store_true", help="Disable insurance entity extraction")
     parser.add_argument("--fast", "-f", action="store_true", help="Fast mode: skip knowledge graph building")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     
@@ -448,20 +510,20 @@ async def main():
         
         # Print summary
         print("\n" + "="*50)
-        print("INGESTION SUMMARY")
+        print("INSURANCE DOCUMENT INGESTION SUMMARY")
         print("="*50)
-        print(f"Documents processed: {len(results)}")
+        print(f"Insurance documents processed: {len(results)}")
         print(f"Total chunks created: {sum(r.chunks_created for r in results)}")
-        print(f"Total entities extracted: {sum(r.entities_extracted for r in results)}")
-        print(f"Total graph episodes: {sum(r.relationships_created for r in results)}")
+        print(f"Total insurance entities extracted: {sum(r.entities_extracted for r in results)}")
+        print(f"Total knowledge graph episodes: {sum(r.relationships_created for r in results)}")
         print(f"Total errors: {sum(len(r.errors) for r in results)}")
         print(f"Total processing time: {total_time:.2f} seconds")
         print()
         
-        # Print individual results
+        # Print individual results with insurance details
         for result in results:
             status = "✓" if not result.errors else "✗"
-            print(f"{status} {result.title}: {result.chunks_created} chunks, {result.entities_extracted} entities")
+            print(f"{status} {result.title}: {result.chunks_created} chunks, {result.entities_extracted} insurance entities")
             
             if result.errors:
                 for error in result.errors:
