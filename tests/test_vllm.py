@@ -35,3 +35,6 @@ for line in response.iter_lines():
                 continue
 
 print()  # Add newline at the end
+
+if __name__ == "__main__":
+    pass

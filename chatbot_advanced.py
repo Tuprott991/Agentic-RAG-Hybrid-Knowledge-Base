@@ -8,14 +8,18 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import threading
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+load_dotenv()  # Load environment variables from .env file
 
 @dataclass
 class ChatbotSettings:
     """Configuration settings for the chatbot"""
     max_tokens: int = 2048
     temperature: float = 0.2
-    model: str = "gemma-3-27b-it-q4_0"
-    base_url: str = "https://e0e11edb7719.ngrok-free.app//v1/chat/completions"
+    model: str = "gpt-4.1-mini"
+    base_url: str = "https://api.openai.com/v1/chat/completions"
+    api_key: str = os.getenv("OPENAI_API_KEY")
     streaming_delay: float = 0.01
     auto_save: bool = False
     show_typing_indicator: bool = True
@@ -23,7 +27,7 @@ class ChatbotSettings:
 class AdvancedStreamingChatbot:
     def __init__(self, settings: ChatbotSettings = None):
         self.settings = settings or ChatbotSettings()
-        self.headers = {"Content-Type": "application/json"}
+        self.headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.settings.api_key}"}
         self.conversation_history: List[Dict[str, str]] = []
         self.current_theme = "general"
         self.themes = {
