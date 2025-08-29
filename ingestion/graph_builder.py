@@ -6,25 +6,295 @@ import asyncio
 import re
 import yaml
 
-from graphiti_core import Graphiti
 from dotenv import load_dotenv
 
 from .chunker import DocumentChunk
 
-# Import graph utilities
+# Try to import Graphiti and Neo4j
 try:
-    from ..agent.graph_utils import GraphitiClient
+    from graphiti_core import Graphiti
+    GRAPHITI_AVAILABLE = True
 except ImportError:
-    # For direct execution or testing 
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from agent.graph_utils import GraphitiClient
+    GRAPHITI_AVAILABLE = False
+
+try:
+    from neo4j import AsyncGraphDatabase
+    NEO4J_AVAILABLE = True
+except ImportError:
+    NEO4J_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+# Log availability after logger is defined
+if not GRAPHITI_AVAILABLE:
+    logger.warning("graphiti_core not available. Using direct Neo4j integration.")
+if not NEO4J_AVAILABLE:
+    logger.warning("neo4j driver not available. Graph building will be disabled.")
+
+
+class GraphitiClient:
+    """Simple wrapper for Neo4j graph operations with insurance ontology support."""
+    
+    def __init__(self):
+        """Initialize Neo4j client."""
+        if not NEO4J_AVAILABLE:
+            logger.warning("Neo4j driver not available. Graph operations will be disabled.")
+            self.driver = None
+            self._initialized = False
+            return
+        
+        # Get Neo4j connection details from environment
+        self.uri = os.getenv("NEO4J_URI", "neo4j://localhost:7687")
+        self.username = os.getenv("NEO4J_USER", "neo4j")
+        self.password = os.getenv("NEO4J_PASSWORD", "password")
+        
+        # Initialize client
+        self.driver = None
+        self._initialized = False
+    
+    async def initialize(self):
+        """Initialize the Neo4j client."""
+        if not NEO4J_AVAILABLE:
+            logger.warning("Neo4j driver not available, skipping graph initialization")
+            return
+        
+        if not self._initialized:
+            try:
+                # Initialize Neo4j driver
+                self.driver = AsyncGraphDatabase.driver(
+                    self.uri,
+                    auth=(self.username, self.password)
+                )
+                
+                # Test connection
+                async with self.driver.session() as session:
+                    result = await session.run("RETURN 1 as test")
+                    await result.consume()
+                
+                self._initialized = True
+                logger.info(f"Neo4j client initialized with URI: {self.uri}")
+                
+                # Create indexes for better performance
+                await self._create_indexes()
+                
+            except Exception as e:
+                logger.error(f"Failed to initialize Neo4j client: {e}")
+                self.driver = None
+                self._initialized = False
+                logger.warning("Continuing without graph functionality")
+    
+    async def close(self):
+        """Close the Neo4j client."""
+        if self._initialized and self.driver:
+            try:
+                await self.driver.close()
+            except Exception as e:
+                logger.warning(f"Error closing Neo4j client: {e}")
+            finally:
+                self._initialized = False
+                logger.info("Neo4j client closed")
+    
+    async def _create_indexes(self):
+        """Create Neo4j indexes for better performance."""
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS FOR (d:Document) ON (d.doc_id)",
+            "CREATE INDEX IF NOT EXISTS FOR (p:Policy) ON (p.policy_number)",
+            "CREATE INDEX IF NOT EXISTS FOR (c:Chunk) ON (c.chunk_id)",
+            "CREATE INDEX IF NOT EXISTS FOR (b:Benefit) ON (b.benefit_id)",
+            "CREATE INDEX IF NOT EXISTS FOR (r:Rider) ON (r.code)"
+        ]
+        
+        async with self.driver.session() as session:
+            for index_query in indexes:
+                try:
+                    await session.run(index_query)
+                except Exception as e:
+                    logger.warning(f"Failed to create index: {e}")
+    
+    async def add_episode(self, episode_id: str, content: str, source: str, 
+                         timestamp: datetime, metadata: Optional[Dict[str, Any]] = None):
+        """Add a document episode to the knowledge graph."""
+        if not self._initialized or not self.driver:
+            logger.warning("Neo4j client not initialized, skipping episode addition")
+            return
+        
+        try:
+            async with self.driver.session() as session:
+                # Create Document node
+                doc_query = """
+                MERGE (d:Document {doc_id: $episode_id})
+                SET d.title = $title,
+                    d.source = $source,
+                    d.content = $content,
+                    d.timestamp = $timestamp,
+                    d.metadata = $metadata
+                RETURN d
+                """
+                
+                await session.run(doc_query, {
+                    "episode_id": episode_id,
+                    "title": metadata.get("document_title", "Unknown") if metadata else "Unknown",
+                    "source": source,
+                    "content": content[:5000],  # Limit content size
+                    "timestamp": timestamp.isoformat(),
+                    "metadata": str(metadata) if metadata else "{}"
+                })
+                
+                # Extract and create insurance entities from content
+                await self._extract_and_create_entities(session, episode_id, content, metadata)
+                
+                logger.info(f"Added episode {episode_id} to Neo4j graph")
+                
+        except Exception as e:
+            logger.error(f"Failed to add episode {episode_id} to Neo4j: {e}")
+    
+    async def _extract_and_create_entities(self, session, doc_id: str, content: str, metadata: Optional[Dict[str, Any]] = None):
+        """Extract and create insurance entities in Neo4j."""
+        try:
+            # Extract policy information
+            policies = self._extract_simple_policies(content)
+            for policy in policies:
+                await self._create_policy_node(session, doc_id, policy)
+            
+            # Extract benefits
+            benefits = self._extract_simple_benefits(content)
+            for benefit in benefits:
+                await self._create_benefit_node(session, doc_id, benefit)
+            
+            # Extract terms
+            terms = self._extract_simple_terms(content)
+            for term in terms:
+                await self._create_term_node(session, doc_id, term)
+                
+        except Exception as e:
+            logger.error(f"Failed to extract entities for document {doc_id}: {e}")
+    
+    def _extract_simple_policies(self, content: str) -> List[Dict[str, Any]]:
+        """Simple policy extraction."""
+        policies = []
+        
+        # Look for policy numbers
+        policy_patterns = [
+            r'Policy\s+(?:Number|No\.?)\s*:?\s*([A-Z0-9\-/]+)',
+            r'Contract\s+(?:Number|No\.?)\s*:?\s*([A-Z0-9\-/]+)'
+        ]
+        
+        for pattern in policy_patterns:
+            matches = re.finditer(pattern, content, re.IGNORECASE)
+            for match in matches:
+                policies.append({
+                    "policy_number": match.group(1),
+                    "type": "extracted_policy",
+                    "context": match.group(0)
+                })
+        
+        return policies
+    
+    def _extract_simple_benefits(self, content: str) -> List[Dict[str, Any]]:
+        """Simple benefit extraction."""
+        benefits = []
+        
+        # Look for monetary amounts as benefits
+        benefit_patterns = [
+            r'(?:Sum Assured|Death Benefit|Coverage)\s*:?\s*\$?([\d,]+)',
+            r'(?:Benefit|Coverage)\s+of\s+\$?([\d,]+)'
+        ]
+        
+        for pattern in benefit_patterns:
+            matches = re.finditer(pattern, content, re.IGNORECASE)
+            for match in matches:
+                benefits.append({
+                    "amount": match.group(1).replace(',', ''),
+                    "type": "monetary_benefit",
+                    "context": match.group(0)
+                })
+        
+        return benefits
+    
+    def _extract_simple_terms(self, content: str) -> List[Dict[str, Any]]:
+        """Extract insurance terms."""
+        terms = []
+        insurance_terms = [
+            "premium", "policyholder", "beneficiary", "rider", "exclusion",
+            "deductible", "claim", "underwriting", "cash value"
+        ]
+        
+        for term in insurance_terms:
+            if term.lower() in content.lower():
+                terms.append({
+                    "name": term,
+                    "found_in_context": True
+                })
+        
+        return terms
+    
+    async def _create_policy_node(self, session, doc_id: str, policy: Dict[str, Any]):
+        """Create a Policy node in Neo4j."""
+        query = """
+        MATCH (d:Document {doc_id: $doc_id})
+        MERGE (p:Policy {policy_number: $policy_number})
+        SET p.type = $type,
+            p.context = $context
+        MERGE (p)-[:DERIVED_FROM]->(d)
+        """
+        
+        await session.run(query, {
+            "doc_id": doc_id,
+            "policy_number": policy.get("policy_number", "unknown"),
+            "type": policy.get("type", "unknown"),
+            "context": policy.get("context", "")
+        })
+    
+    async def _create_benefit_node(self, session, doc_id: str, benefit: Dict[str, Any]):
+        """Create a Benefit node in Neo4j."""
+        query = """
+        MATCH (d:Document {doc_id: $doc_id})
+        MERGE (b:Benefit {benefit_id: $benefit_id})
+        SET b.amount = $amount,
+            b.type = $type,
+            b.context = $context
+        MERGE (b)-[:DERIVED_FROM]->(d)
+        """
+        
+        benefit_id = f"{doc_id}_benefit_{len(benefit.get('context', ''))}"
+        
+        await session.run(query, {
+            "doc_id": doc_id,
+            "benefit_id": benefit_id,
+            "amount": benefit.get("amount", "0"),
+            "type": benefit.get("type", "unknown"),
+            "context": benefit.get("context", "")
+        })
+    
+    async def _create_term_node(self, session, doc_id: str, term: Dict[str, Any]):
+        """Create a Term node in Neo4j."""
+        query = """
+        MATCH (d:Document {doc_id: $doc_id})
+        MERGE (t:Term {name: $name})
+        MERGE (t)-[:DEFINED_IN]->(d)
+        """
+        
+        await session.run(query, {
+            "doc_id": doc_id,
+            "name": term.get("name", "unknown")
+        })
+    
+    async def clear_graph(self):
+        """Clear the knowledge graph."""
+        if not self._initialized or not self.driver:
+            logger.warning("Neo4j client not initialized, skipping graph clear")
+            return
+        
+        try:
+            async with self.driver.session() as session:
+                # Delete all nodes and relationships
+                await session.run("MATCH (n) DETACH DELETE n")
+                logger.info("Cleared Neo4j graph")
+        except Exception as e:
+            logger.error(f"Failed to clear Neo4j graph: {e}")
 
 
 class GraphBuilder:
@@ -376,6 +646,7 @@ class GraphBuilder:
             enriched_chunks.append(enriched_chunk)
         
         logger.info("Insurance entity extraction complete")
+        return enriched_chunks
     def _apply_ontology_hints(self, text: str) -> Dict[str, List[Dict[str, Any]]]:
         """Apply ontology ingestion hints to extract entities."""
         extracted = {

@@ -18,7 +18,6 @@ from .graph_builder import create_graph_builder
 # Import agent utilities
 try:
     from ..agent.db_utils import initialize_database, close_database, db_pool
-    from ..agent.graph_utils import initialize_graph, close_graph
     from ..agent.models import IngestionConfig, IngestionResult
 except ImportError:
     # For direct execution or testing
@@ -26,8 +25,16 @@ except ImportError:
     import os
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from agent.db_utils import initialize_database, close_database, db_pool
-    from agent.graph_utils import initialize_graph, close_graph
     from agent.models import IngestionConfig, IngestionResult
+
+# Simple graph utilities (stubs for now)
+async def initialize_graph():
+    """Initialize graph connections."""
+    logger.info("Graph initialization placeholder")
+
+async def close_graph():
+    """Close graph connections.""" 
+    logger.info("Graph close placeholder")
 
 # Load environment variables
 load_dotenv()
@@ -176,13 +183,19 @@ class DocumentIngestionPipeline:
         
         logger.info(f"Processing document: {document_title}")
         
-        # Chunk the document
-        chunks = self.chunker.chunk_document(
+        # Chunk the document (handle both async and sync chunkers)
+        chunk_result = self.chunker.chunk_document(
             content=document_content,
             title=document_title,
             source=document_source,
             metadata=document_metadata
         )
+        
+        # If it's a coroutine (SemanticChunker), await it
+        if asyncio.iscoroutine(chunk_result):
+            chunks = await chunk_result
+        else:
+            chunks = chunk_result
         
         if not chunks:
             logger.warning(f"No chunks created for {document_title}")
