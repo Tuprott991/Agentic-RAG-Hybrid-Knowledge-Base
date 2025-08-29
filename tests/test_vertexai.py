@@ -1,85 +1,35 @@
-from typing import Dict, List, Union
-import os
-from google.cloud import aiplatform
-from google.auth import default
-from google.auth.exceptions import DefaultCredentialsError
-from google.protobuf import json_format
-from google.protobuf.struct_pb2 import Value
+from google.auth.transport.requests import Request
+from google.oauth2.service_account import Credentials
+api_key_path = "prusandbx-nprd-uat-kw1ozq-dcfe6900463a.json"
+credentials = Credentials.from_service_account_file(api_key_path,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"])
 
-def predict_gemma(
-    project: str,
-    endpoint_id: str,
-    instances: Union[Dict, List[Dict]],
-    location: str = "asia-southeast1",
-    credentials_path: str = None,
-):
-    """
-    Call a deployed Gemma model on Vertex AI.
-    
-    Args:
-        project: Google Cloud project ID
-        endpoint_id: Vertex AI endpoint ID
-        instances: Input instances for prediction
-        location: Google Cloud region
-        credentials_path: Optional path to service account JSON file
-    """
-    try:
-        # Try to authenticate
-        if credentials_path and os.path.exists(credentials_path):
-            # Use service account key file
-            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
-            print(f"Using credentials from: {credentials_path}")
-        
-        # Initialize the client
-        client_options = {"api_endpoint": f"{location}-aiplatform.googleapis.com"}
-        client = aiplatform.gapic.PredictionServiceClient(client_options=client_options)
-        
-        # Format the endpoint path
-        endpoint = client.endpoint_path(
-            project=project, location=location, endpoint=endpoint_id
-        )
+PROJECT_ID = "prusandbx-nprd-uat-kw1ozq"
+REGION = "asia-southeast1"
 
-        # If single dict, wrap into list
-        if isinstance(instances, dict):
-            instances = [instances]
+import vertexai
 
-        # Convert each instance into protobuf Value
-        proto_instances = [json_format.ParseDict(inst, Value()) for inst in instances]
+vertexai.init(project=PROJECT_ID, location=REGION, credentials=credentials)
 
-        # Make prediction
-        response = client.predict(
-            endpoint=endpoint,
-            instances=proto_instances,
-            parameters=json_format.ParseDict({}, Value()),
-        )
+from vertexai.generative_models import GenerativeModel, GenerationConfig
 
-        return response.predictions
-        
-    except DefaultCredentialsError as e:
-        print("❌ Authentication Error!")
-        print("Your Google Cloud credentials are not set up. Here are the options:")
-        print("\n1. Install Google Cloud CLI and run:")
-        print("   gcloud auth application-default login")
-        print("\n2. Set up a service account key:")
-        print("   - Go to Google Cloud Console > IAM & Admin > Service Accounts")
-        print("   - Create a service account with Vertex AI permissions")
-        print("   - Download the JSON key file")
-        print("   - Set GOOGLE_APPLICATION_CREDENTIALS environment variable")
-        print(f"\nOriginal error: {e}")
-        return None
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        return None
+# Use Gemini-2.5-flash
+model = GenerativeModel("gemini-2.5-flash")
+# res = model.generate_content("What is the capital of VietNam?")
+# print(res.text)
 
+generation_config = GenerationConfig(
+    max_output_tokens=8192,
+    temperature=0.7,
+    top_p=0.9,
+    top_k=32,
 
-# Example usage - with service account key
-result = predict_gemma(
-    project="951379520420",
-    endpoint_id="7741437070798749696",
-    location="asia-southeast1",
-    instances={"content": "Hello Gemma, write me a haiku about the ocean."},
-    credentials_path="path/to/your/service-account-key.json"  # Add your key file path here
 )
 
-print(result)
-    
+# res = model.generate_content("Write about Ngo Dinh Diem?, answer in Vietnamese",
+#                               stream=True, generation_config= generation_config)
+# for r in res:
+#     print(r.text, end="", flush=True)
+
+chat = model.start_chat()
+res = chat.send_message("what is 2! + 5!?", generation_config= generation_config, stream=True)
