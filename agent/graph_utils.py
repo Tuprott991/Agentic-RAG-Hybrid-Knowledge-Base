@@ -1,18 +1,21 @@
 """
-Database utilities for PostgreSQL connection and operations.
+Graph utilities for Neo4j/Graphiti integration.
 """
 
 import os
 import json
-import asyncio
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime, timedelta, timezone
-from contextlib import asynccontextmanager
-from uuid import UUID
 import logging
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+import asyncio
 
-import asyncpg
-from asyncpg.pool import Pool
+from graphiti_core import Graphiti
+from graphiti_core.utils.maintenance.graph_data_operations import clear_data
+from graphiti_core.llm_client.config import LLMConfig
+from graphiti_core.llm_client.openai_client import OpenAIClient
+from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -20,494 +23,426 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-
-class DatabasePool:
-    """Manages PostgreSQL connection pool."""
+# Help from this PR for setting up the custom clients: https://github.com/getzep/graphiti/pull/601/files
+class GraphitiClient:
+    """Manages Graphiti knowledge graph operations."""
     
-    def __init__(self, database_url: Optional[str] = None):
+    def __init__(
+        self,
+        neo4j_uri: Optional[str] = None,
+        neo4j_user: Optional[str] = None,
+        neo4j_password: Optional[str] = None
+    ):
         """
-        Initialize database pool.
+        Initialize Graphiti client.
         
         Args:
-            database_url: PostgreSQL connection URL
+            neo4j_uri: Neo4j connection URI
+            neo4j_user: Neo4j username
+            neo4j_password: Neo4j password
         """
-        self.database_url = database_url or os.getenv("DATABASE_URL")
-        if not self.database_url:
-            raise ValueError("DATABASE_URL environment variable not set")
+        # Neo4j configuration
+        self.neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI", "bolt://localhost:7687")
+        self.neo4j_user = neo4j_user or os.getenv("NEO4J_USER", "neo4j")
+        self.neo4j_password = neo4j_password or os.getenv("NEO4J_PASSWORD")
         
-        self.pool: Optional[Pool] = None
+        if not self.neo4j_password:
+            raise ValueError("NEO4J_PASSWORD environment variable not set")
+        
+        # LLM configuration
+        self.llm_base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+        self.llm_api_key = os.getenv("LLM_API_KEY")
+        self.llm_choice = os.getenv("LLM_CHOICE", "gpt-4.1-mini")
+        
+        if not self.llm_api_key:
+            raise ValueError("LLM_API_KEY environment variable not set")
+        
+        # Embedding configuration
+        self.embedding_base_url = os.getenv("EMBEDDING_BASE_URL", "https://api.openai.com/v1")
+        self.embedding_api_key = os.getenv("EMBEDDING_API_KEY")
+        self.embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        self.embedding_dimensions = int(os.getenv("VECTOR_DIMENSION", "1536"))
+        
+        if not self.embedding_api_key:
+            raise ValueError("EMBEDDING_API_KEY environment variable not set")
+        
+        self.graphiti: Optional[Graphiti] = None
+        self._initialized = False
     
     async def initialize(self):
-        """Create connection pool."""
-        if not self.pool:
-            self.pool = await asyncpg.create_pool(
-                self.database_url,
-                min_size=5,
-                max_size=20,
-                max_inactive_connection_lifetime=300,
-                command_timeout=60
+        """Initialize Graphiti client."""
+        if self._initialized:
+            return
+        
+        try:
+            # Create LLMConfig
+            llm_config = LLMConfig(
+                api_key=self.llm_api_key,
+                model=self.llm_choice,
+                small_model=self.llm_choice,  # Can be the same as main model
+                base_url=self.llm_base_url
             )
-            logger.info("Database connection pool initialized")
+            
+            # Create OpenAI LLM client
+            llm_client = OpenAIClient(config=llm_config)
+            
+            # Create OpenAI embedder
+            embedder = OpenAIEmbedder(
+                config=OpenAIEmbedderConfig(
+                    api_key=self.embedding_api_key,
+                    embedding_model=self.embedding_model,
+                    embedding_dim=self.embedding_dimensions,
+                    base_url=self.embedding_base_url
+                )
+            )
+            
+            # Initialize Graphiti with custom clients
+            self.graphiti = Graphiti(
+                self.neo4j_uri,
+                self.neo4j_user,
+                self.neo4j_password,
+                llm_client=llm_client,
+                embedder=embedder,
+                cross_encoder=OpenAIRerankerClient(client=llm_client, config=llm_config)
+            )
+            
+            # Build indices and constraints
+            await self.graphiti.build_indices_and_constraints()
+            
+            self._initialized = True
+            logger.info(f"Graphiti client initialized successfully with LLM: {self.llm_choice} and embedder: {self.embedding_model}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Graphiti: {e}")
+            raise
     
     async def close(self):
-        """Close connection pool."""
-        if self.pool:
-            await self.pool.close()
-            self.pool = None
-            logger.info("Database connection pool closed")
+        """Close Graphiti connection."""
+        if self.graphiti:
+            await self.graphiti.close()
+            self.graphiti = None
+            self._initialized = False
+            logger.info("Graphiti client closed")
     
-    @asynccontextmanager
-    async def acquire(self):
-        """Acquire a connection from the pool."""
-        if not self.pool:
+    async def add_episode(
+        self,
+        episode_id: str,
+        content: str,
+        source: str,
+        timestamp: Optional[datetime] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Add an episode to the knowledge graph.
+        
+        Args:
+            episode_id: Unique episode identifier
+            content: Episode content
+            source: Source of the content
+            timestamp: Episode timestamp
+            metadata: Additional metadata
+        """
+        if not self._initialized:
             await self.initialize()
         
-        async with self.pool.acquire() as connection:
-            yield connection
-
-
-# Global database pool instance
-db_pool = DatabasePool()
-
-
-async def initialize_database():
-    """Initialize database connection pool."""
-    await db_pool.initialize()
-
-
-async def close_database():
-    """Close database connection pool."""
-    await db_pool.close()
-
-
-# Session Management Functions
-async def create_session(
-    user_id: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    timeout_minutes: int = 60
-) -> str:
-    """
-    Create a new session.
-    
-    Args:
-        user_id: Optional user identifier
-        metadata: Optional session metadata
-        timeout_minutes: Session timeout in minutes
-    
-    Returns:
-        Session ID
-    """
-    async with db_pool.acquire() as conn:
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=timeout_minutes)
+        episode_timestamp = timestamp or datetime.now(timezone.utc)
         
-        result = await conn.fetchrow(
-            """
-            INSERT INTO sessions (user_id, metadata, expires_at)
-            VALUES ($1, $2, $3)
-            RETURNING id::text
-            """,
-            user_id,
-            json.dumps(metadata or {}),
-            expires_at
+        # Import EpisodeType for proper source handling
+        from graphiti_core.nodes import EpisodeType
+        
+        await self.graphiti.add_episode(
+            name=episode_id,
+            episode_body=content,
+            source=EpisodeType.text,  # Always use text type for our content
+            source_description=source,
+            reference_time=episode_timestamp
         )
         
-        return result["id"]
-
-
-async def get_session(session_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Get session by ID.
+        logger.info(f"Added episode {episode_id} to knowledge graph")
     
-    Args:
-        session_id: Session UUID
-    
-    Returns:
-        Session data or None if not found/expired
-    """
-    async with db_pool.acquire() as conn:
-        result = await conn.fetchrow(
-            """
-            SELECT 
-                id::text,
-                user_id,
-                metadata,
-                created_at,
-                updated_at,
-                expires_at
-            FROM sessions
-            WHERE id = $1::uuid
-            AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-            """,
-            session_id
-        )
+    async def search(
+        self,
+        query: str,
+        center_node_distance: int = 2,
+        use_hybrid_search: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Search the knowledge graph.
         
-        if result:
+        Args:
+            query: Search query
+            center_node_distance: Distance from center nodes
+            use_hybrid_search: Whether to use hybrid search
+        
+        Returns:
+            Search results
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        try:
+            # Use Graphiti's search method (simplified parameters)
+            results = await self.graphiti.search(query)
+            
+            # Convert results to dictionaries
+            return [
+                {
+                    "fact": result.fact,
+                    "uuid": str(result.uuid),
+                    "valid_at": str(result.valid_at) if hasattr(result, 'valid_at') and result.valid_at else None,
+                    "invalid_at": str(result.invalid_at) if hasattr(result, 'invalid_at') and result.invalid_at else None,
+                    "source_node_uuid": str(result.source_node_uuid) if hasattr(result, 'source_node_uuid') and result.source_node_uuid else None
+                }
+                for result in results
+            ]
+            
+        except Exception as e:
+            logger.error(f"Graph search failed: {e}")
+            return []
+    
+    async def get_related_entities(
+        self,
+        entity_name: str,
+        relationship_types: Optional[List[str]] = None,
+        depth: int = 1
+    ) -> Dict[str, Any]:
+        """
+        Get entities related to a given entity using Graphiti search.
+        
+        Args:
+            entity_name: Name of the entity
+            relationship_types: Types of relationships to follow (not used with Graphiti)
+            depth: Maximum depth to traverse (not used with Graphiti)
+        
+        Returns:
+            Related entities and relationships
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        # Use Graphiti search to find related information about the entity
+        results = await self.graphiti.search(f"relationships involving {entity_name}")
+        
+        # Extract entity information from the search results
+        related_entities = set()
+        facts = []
+        
+        for result in results:
+            facts.append({
+                "fact": result.fact,
+                "uuid": str(result.uuid),
+                "valid_at": str(result.valid_at) if hasattr(result, 'valid_at') and result.valid_at else None
+            })
+            
+            # Simple entity extraction from fact text (could be enhanced)
+            if entity_name.lower() in result.fact.lower():
+                related_entities.add(entity_name)
+        
+        return {
+            "central_entity": entity_name,
+            "related_facts": facts,
+            "search_method": "graphiti_semantic_search"
+        }
+    
+    async def get_entity_timeline(
+        self,
+        entity_name: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get timeline of facts for an entity using Graphiti.
+        
+        Args:
+            entity_name: Name of the entity
+            start_date: Start of time range (not currently used)
+            end_date: End of time range (not currently used)
+        
+        Returns:
+            Timeline of facts
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        # Search for temporal information about the entity
+        results = await self.graphiti.search(f"timeline history of {entity_name}")
+        
+        timeline = []
+        for result in results:
+            timeline.append({
+                "fact": result.fact,
+                "uuid": str(result.uuid),
+                "valid_at": str(result.valid_at) if hasattr(result, 'valid_at') and result.valid_at else None,
+                "invalid_at": str(result.invalid_at) if hasattr(result, 'invalid_at') and result.invalid_at else None
+            })
+        
+        # Sort by valid_at if available
+        timeline.sort(key=lambda x: x.get('valid_at') or '', reverse=True)
+        
+        return timeline
+    
+    async def get_graph_statistics(self) -> Dict[str, Any]:
+        """
+        Get basic statistics about the knowledge graph.
+        
+        Returns:
+            Graph statistics
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        # For now, return a simple search to verify the graph is working
+        # More detailed statistics would require direct Neo4j access
+        try:
+            test_results = await self.graphiti.search("test")
             return {
-                "id": result["id"],
-                "user_id": result["user_id"],
-                "metadata": json.loads(result["metadata"]),
-                "created_at": result["created_at"].isoformat(),
-                "updated_at": result["updated_at"].isoformat(),
-                "expires_at": result["expires_at"].isoformat() if result["expires_at"] else None
+                "graphiti_initialized": True,
+                "sample_search_results": len(test_results),
+                "note": "Detailed statistics require direct Neo4j access"
             }
-        
-        return None
-
-
-async def update_session(session_id: str, metadata: Dict[str, Any]) -> bool:
-    """
-    Update session metadata.
+        except Exception as e:
+            return {
+                "graphiti_initialized": False,
+                "error": str(e)
+            }
     
-    Args:
-        session_id: Session UUID
-        metadata: New metadata to merge
-    
-    Returns:
-        True if updated, False if not found
-    """
-    async with db_pool.acquire() as conn:
-        result = await conn.execute(
-            """
-            UPDATE sessions
-            SET metadata = metadata || $2::jsonb
-            WHERE id = $1::uuid
-            AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
-            """,
-            session_id,
-            json.dumps(metadata)
-        )
+    async def clear_graph(self):
+        """Clear all data from the graph (USE WITH CAUTION)."""
+        if not self._initialized:
+            await self.initialize()
         
-        return result.split()[-1] != "0"
+        try:
+            # Use Graphiti's proper clear_data function with the driver
+            await clear_data(self.graphiti.driver)
+            logger.warning("Cleared all data from knowledge graph")
+        except Exception as e:
+            logger.error(f"Failed to clear graph using clear_data: {e}")
+            # Fallback: Close and reinitialize (this will create fresh indices)
+            if self.graphiti:
+                await self.graphiti.close()
+            
+            # Create OpenAI-compatible clients for reinitialization
+            llm_config = LLMConfig(
+                api_key=self.llm_api_key,
+                model=self.llm_choice,
+                small_model=self.llm_choice,
+                base_url=self.llm_base_url
+            )
+            
+            llm_client = OpenAIClient(config=llm_config)
+            
+            embedder = OpenAIEmbedder(
+                config=OpenAIEmbedderConfig(
+                    api_key=self.embedding_api_key,
+                    embedding_model=self.embedding_model,
+                    embedding_dim=self.embedding_dimensions,
+                    base_url=self.embedding_base_url
+                )
+            )
+            
+            self.graphiti = Graphiti(
+                self.neo4j_uri,
+                self.neo4j_user,
+                self.neo4j_password,
+                llm_client=llm_client,
+                embedder=embedder,
+                cross_encoder=OpenAIRerankerClient(client=llm_client, config=llm_config)
+            )
+            await self.graphiti.build_indices_and_constraints()
+            
+            logger.warning("Reinitialized Graphiti client (fresh indices created)")
 
 
-# Message Management Functions
-async def add_message(
-    session_id: str,
-    role: str,
+# Global Graphiti client instance
+graph_client = GraphitiClient()
+
+
+async def initialize_graph():
+    """Initialize graph client."""
+    await graph_client.initialize()
+
+
+async def close_graph():
+    """Close graph client."""
+    await graph_client.close()
+
+
+# Convenience functions for common operations
+async def add_to_knowledge_graph(
     content: str,
+    source: str,
+    episode_id: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None
 ) -> str:
     """
-    Add a message to a session.
+    Add content to the knowledge graph.
     
     Args:
-        session_id: Session UUID
-        role: Message role (user/assistant/system)
-        content: Message content
-        metadata: Optional message metadata
+        content: Content to add
+        source: Source of the content
+        episode_id: Optional episode ID
+        metadata: Optional metadata
     
     Returns:
-        Message ID
+        Episode ID
     """
-    async with db_pool.acquire() as conn:
-        result = await conn.fetchrow(
-            """
-            INSERT INTO messages (session_id, role, content, metadata)
-            VALUES ($1::uuid, $2, $3, $4)
-            RETURNING id::text
-            """,
-            session_id,
-            role,
-            content,
-            json.dumps(metadata or {})
-        )
-        
-        return result["id"]
+    if not episode_id:
+        episode_id = f"episode_{datetime.now(timezone.utc).isoformat()}"
+    
+    await graph_client.add_episode(
+        episode_id=episode_id,
+        content=content,
+        source=source,
+        metadata=metadata
+    )
+    
+    return episode_id
 
 
-async def get_session_messages(
-    session_id: str,
-    limit: Optional[int] = None
+async def search_knowledge_graph(
+    query: str
 ) -> List[Dict[str, Any]]:
     """
-    Get messages for a session.
+    Search the knowledge graph.
     
     Args:
-        session_id: Session UUID
-        limit: Maximum number of messages to return
+        query: Search query
     
     Returns:
-        List of messages ordered by creation time
+        Search results
     """
-    async with db_pool.acquire() as conn:
-        query = """
-            SELECT 
-                id::text,
-                role,
-                content,
-                metadata,
-                created_at
-            FROM messages
-            WHERE session_id = $1::uuid
-            ORDER BY created_at
-        """
-        
-        if limit:
-            query += f" LIMIT {limit}"
-        
-        results = await conn.fetch(query, session_id)
-        
-        return [
-            {
-                "id": row["id"],
-                "role": row["role"],
-                "content": row["content"],
-                "metadata": json.loads(row["metadata"]),
-                "created_at": row["created_at"].isoformat()
-            }
-            for row in results
-        ]
+    return await graph_client.search(query)
 
 
-# Document Management Functions
-async def get_document(document_id: str) -> Optional[Dict[str, Any]]:
+async def get_entity_relationships(
+    entity: str,
+    depth: int = 2
+) -> Dict[str, Any]:
     """
-    Get document by ID.
+    Get relationships for an entity.
     
     Args:
-        document_id: Document UUID
+        entity: Entity name
+        depth: Maximum traversal depth
     
     Returns:
-        Document data or None if not found
+        Entity relationships
     """
-    async with db_pool.acquire() as conn:
-        result = await conn.fetchrow(
-            """
-            SELECT 
-                id::text,
-                title,
-                source,
-                content,
-                metadata,
-                created_at,
-                updated_at
-            FROM documents
-            WHERE id = $1::uuid
-            """,
-            document_id
-        )
-        
-        if result:
-            return {
-                "id": result["id"],
-                "title": result["title"],
-                "source": result["source"],
-                "content": result["content"],
-                "metadata": json.loads(result["metadata"]),
-                "created_at": result["created_at"].isoformat(),
-                "updated_at": result["updated_at"].isoformat()
-            }
-        
-        return None
+    return await graph_client.get_related_entities(entity, depth=depth)
 
 
-async def list_documents(
-    limit: int = 100,
-    offset: int = 0,
-    metadata_filter: Optional[Dict[str, Any]] = None
-) -> List[Dict[str, Any]]:
+async def test_graph_connection() -> bool:
     """
-    List documents with optional filtering.
-    
-    Args:
-        limit: Maximum number of documents to return
-        offset: Number of documents to skip
-        metadata_filter: Optional metadata filter
-    
-    Returns:
-        List of documents
-    """
-    async with db_pool.acquire() as conn:
-        query = """
-            SELECT 
-                d.id::text,
-                d.title,
-                d.source,
-                d.metadata,
-                d.created_at,
-                d.updated_at,
-                COUNT(c.id) AS chunk_count
-            FROM documents d
-            LEFT JOIN chunks c ON d.id = c.document_id
-        """
-        
-        params = []
-        conditions = []
-        
-        if metadata_filter:
-            conditions.append(f"d.metadata @> ${len(params) + 1}::jsonb")
-            params.append(json.dumps(metadata_filter))
-        
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-        
-        query += """
-            GROUP BY d.id, d.title, d.source, d.metadata, d.created_at, d.updated_at
-            ORDER BY d.created_at DESC
-            LIMIT $%d OFFSET $%d
-        """ % (len(params) + 1, len(params) + 2)
-        
-        params.extend([limit, offset])
-        
-        results = await conn.fetch(query, *params)
-        
-        return [
-            {
-                "id": row["id"],
-                "title": row["title"],
-                "source": row["source"],
-                "metadata": json.loads(row["metadata"]),
-                "created_at": row["created_at"].isoformat(),
-                "updated_at": row["updated_at"].isoformat(),
-                "chunk_count": row["chunk_count"]
-            }
-            for row in results
-        ]
-
-
-# Vector Search Functions
-async def vector_search(
-    embedding: List[float],
-    limit: int = 10
-) -> List[Dict[str, Any]]:
-    """
-    Perform vector similarity search.
-    
-    Args:
-        embedding: Query embedding vector
-        limit: Maximum number of results
-    
-    Returns:
-        List of matching chunks ordered by similarity (best first)
-    """
-    async with db_pool.acquire() as conn:
-        # Convert embedding to PostgreSQL vector string format
-        # PostgreSQL vector format: '[1.0,2.0,3.0]' (no spaces after commas)
-        embedding_str = '[' + ','.join(map(str, embedding)) + ']'
-        
-        results = await conn.fetch(
-            "SELECT * FROM match_chunks($1::vector, $2)",
-            embedding_str,
-            limit
-        )
-        
-        return [
-            {
-                "chunk_id": row["chunk_id"],
-                "document_id": row["document_id"],
-                "content": row["content"],
-                "similarity": row["similarity"],
-                "metadata": json.loads(row["metadata"]),
-                "document_title": row["document_title"],
-                "document_source": row["document_source"]
-            }
-            for row in results
-        ]
-
-
-async def hybrid_search(
-    embedding: List[float],
-    query_text: str,
-    limit: int = 10,
-    text_weight: float = 0.3
-) -> List[Dict[str, Any]]:
-    """
-    Perform hybrid search (vector + keyword).
-    
-    Args:
-        embedding: Query embedding vector
-        query_text: Query text for keyword search
-        limit: Maximum number of results
-        text_weight: Weight for text similarity (0-1)
-    
-    Returns:
-        List of matching chunks ordered by combined score (best first)
-    """
-    async with db_pool.acquire() as conn:
-        # Convert embedding to PostgreSQL vector string format
-        # PostgreSQL vector format: '[1.0,2.0,3.0]' (no spaces after commas)
-        embedding_str = '[' + ','.join(map(str, embedding)) + ']'
-        
-        results = await conn.fetch(
-            "SELECT * FROM hybrid_search($1::vector, $2, $3, $4)",
-            embedding_str,
-            query_text,
-            limit,
-            text_weight
-        )
-        
-        return [
-            {
-                "chunk_id": row["chunk_id"],
-                "document_id": row["document_id"],
-                "content": row["content"],
-                "combined_score": row["combined_score"],
-                "vector_similarity": row["vector_similarity"],
-                "text_similarity": row["text_similarity"],
-                "metadata": json.loads(row["metadata"]),
-                "document_title": row["document_title"],
-                "document_source": row["document_source"]
-            }
-            for row in results
-        ]
-
-
-# Chunk Management Functions
-async def get_document_chunks(document_id: str) -> List[Dict[str, Any]]:
-    """
-    Get all chunks for a document.
-    
-    Args:
-        document_id: Document UUID
-    
-    Returns:
-        List of chunks ordered by chunk index
-    """
-    async with db_pool.acquire() as conn:
-        results = await conn.fetch(
-            "SELECT * FROM get_document_chunks($1::uuid)",
-            document_id
-        )
-        
-        return [
-            {
-                "chunk_id": row["chunk_id"],
-                "content": row["content"],
-                "chunk_index": row["chunk_index"],
-                "metadata": json.loads(row["metadata"])
-            }
-            for row in results
-        ]
-
-
-# Utility Functions
-async def execute_query(query: str, *params) -> List[Dict[str, Any]]:
-    """
-    Execute a custom query.
-    
-    Args:
-        query: SQL query
-        *params: Query parameters
-    
-    Returns:
-        Query results
-    """
-    async with db_pool.acquire() as conn:
-        results = await conn.fetch(query, *params)
-        return [dict(row) for row in results]
-
-
-async def test_connection() -> bool:
-    """
-    Test database connection.
+    Test graph database connection.
     
     Returns:
         True if connection successful
     """
     try:
-        async with db_pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
+        await graph_client.initialize()
+        stats = await graph_client.get_graph_statistics()
+        logger.info(f"Graph connection successful. Stats: {stats}")
         return True
     except Exception as e:
-        logger.error(f"Database connection test failed: {e}")
+        logger.error(f"Graph connection test failed: {e}")
         return False
